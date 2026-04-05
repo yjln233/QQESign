@@ -1,3 +1,4 @@
+
 // QQESign — 免越狱轻松签版 (NT架构)
 // 防撤回 / 闪照保存+无限查看 / 自定义设备名+电量
 // Target: com.tencent.mqq (arm64) — sideload injection
@@ -12,8 +13,9 @@
 // 确认在当前版本 QQ 二进制中实际存在。
 //
 // 防撤回：
-//   NT 撤回流：网络解析(QQMessageRecallNetEngine) → 模块处理(QQMessageRecallModule)
-//   → UI灰条(NTAIOGrayTipsOtherLinkRecallHandle)。三层全部拦截。
+//   保守稳定版：移除全局 selector 扫描与宽泛类名匹配，
+//   仅保留主序中已确认存在、且 type encoding 已核对的显式 hook。
+//   同时将安装时机后移，减少 ctor 阶段全局扫描导致的开屏闪退风险。
 //
 // 闪照：
 //   OCPicElement / QQBasePhoto.isFlashPic 返回 NO 即可解除
@@ -277,7 +279,7 @@ static void addESignButton(UIViewController *vc, SEL action) {
     vc.navigationItem.rightBarButtonItems = items;
 }
 
-#pragma mark - 1. Anti-recall runtime hooks (NT QQ)
+#pragma mark - 1. Anti-recall runtime hooks (NT QQ) - stable build
 
 typedef struct {
     Class cls;
@@ -285,7 +287,7 @@ typedef struct {
     IMP orig;
 } QQESignRecallHookRecord;
 
-static QQESignRecallHookRecord gQQESignRecallHooks[256];
+static QQESignRecallHookRecord gQQESignRecallHooks[128];
 static NSUInteger gQQESignRecallHookCount = 0;
 
 typedef void (*QQEOrigVoidOneObj)(id, SEL, id);
@@ -387,72 +389,6 @@ static BOOL qqesignSwizzleRecallMethodOnClass(Class cls,
           class_getName(cls),
           selName);
     return YES;
-}
-
-static BOOL qqesignClassNameContains(const char *clsName, const char *needle) {
-    return (clsName && needle && strstr(clsName, needle) != NULL);
-}
-
-static BOOL qqesignMayBeRecallRelatedClass(const char *clsName, const char *selName) {
-    if (!clsName || !selName) return NO;
-
-    if (qqesignClassNameContains(clsName, "Recall") ||
-        qqesignClassNameContains(clsName, "Revoke") ||
-        qqesignClassNameContains(clsName, "QQMessage") ||
-        qqesignClassNameContains(clsName, "DecouplingBridge") ||
-        qqesignClassNameContains(clsName, "MsgListener") ||
-        qqesignClassNameContains(clsName, "PushManager") ||
-        qqesignClassNameContains(clsName, "SideAccount") ||
-        qqesignClassNameContains(clsName, "AIO") ||
-        qqesignClassNameContains(clsName, "Chat") ||
-        qqesignClassNameContains(clsName, "Photo") ||
-        qqesignClassNameContains(clsName, "Browser") ||
-        qqesignClassNameContains(clsName, "File") ||
-        qqesignClassNameContains(clsName, "Upload") ||
-        qqesignClassNameContains(clsName, "Video") ||
-        qqesignClassNameContains(clsName, "FloatEar") ||
-        qqesignClassNameContains(clsName, "Floating") ||
-        qqesignClassNameContains(clsName, "RichMedia") ||
-        qqesignClassNameContains(clsName, "GPro")) {
-        return YES;
-    }
-
-    if (!strcmp(selName, "recallMessagePair:") && qqesignClassNameContains(clsName, "Bridge")) return YES;
-    if (!strcmp(selName, "msgRecallMsgNotication:") && qqesignClassNameContains(clsName, "PushManager")) return YES;
-    if (!strcmp(selName, "findRecallModelAndRemove:") && qqesignClassNameContains(clsName, "Handler")) return YES;
-    if (!strcmp(selName, "updateCellViewRecall") && qqesignClassNameContains(clsName, "AIOCell")) return YES;
-    return NO;
-}
-
-static NSUInteger qqesignInstallRecallHooksBySelector(const char *selName,
-                                                      const char *typeEncoding,
-                                                      IMP newImp,
-                                                      const char *tag) {
-    if (!selName || !newImp) return 0;
-
-    int classCount = objc_getClassList(NULL, 0);
-    if (classCount <= 0) return 0;
-
-    Class *classes = (Class *)malloc(sizeof(Class) * (NSUInteger)classCount);
-    if (!classes) return 0;
-
-    classCount = objc_getClassList(classes, classCount);
-    NSUInteger installed = 0;
-
-    for (int i = 0; i < classCount; i++) {
-        Class cls = classes[i];
-        const char *clsName = class_getName(cls);
-        if (!qqesignMayBeRecallRelatedClass(clsName, selName)) continue;
-
-        installed += qqesignSwizzleRecallMethodOnClass(cls,
-                                                       selName,
-                                                       typeEncoding,
-                                                       newImp,
-                                                       tag);
-    }
-
-    free(classes);
-    return installed;
 }
 
 static void qqesignRecallOneObjectBlocker(id self, SEL _cmd, id arg1) {
@@ -594,63 +530,61 @@ static id qqesignRecallConvertBlocker(id self,
 
 static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
     NSUInteger installed = 0;
-    static const QQESignRecallMethodSpec specs[] = {
-        { "QQMessageRecallNetEngine", "parseC2CRecallNotify:bufferLen:subcmd:model:", "B40@0:8r^v16i24i28^{RecallModel=}32", (IMP)qqesignRecallNetEngineBlocker, "net-parse" },
-        { "QQMessageRecallModule", "handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:", "@48@0:8r^v16i24i28Q32^B40", (IMP)qqesignRecallModuleFullBlocker, "module-full" },
-        { "QSideAccountAssistantService", "handleSideAccountRecallNotify:bindUin:tracelessFlag:", "v36@0:8@16Q24B32", (IMP)qqesignRecallSideAccountShortBlocker, "module-short" },
-        { "_TtC15AIOPhotoBrowser31NTAIOPhotoBrowserViewController", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "photo-browser-receive" },
-        { "_TtC9NTAIOChat21NTStreamMsgAIOHandler", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "stream-receive" },
-        { "_TtC9NTAIOChat20NTAIOFloatEarManager", "onRecvRecallMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear" },
-        { "NTFAViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-view" },
-        { "QQChatFilesViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "chat-files" },
-        { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-browser" },
-        { "MQZoneUploadPhotoViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "mqzone-upload" },
-        { "QQTinyVideoImageView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "tiny-video" },
-        { "FAVideoPlayerView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-video" },
-        { "QQFloatingViewManager", "msgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "floating-view" },
-        { "QQMessageDecouplingBridge", "recallMessagePair:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "decoupling-bridge" },
-        { "QQMessageRecallModule", "convertRecallItemToMsg:recallModel:msgType:bindUin:", "@44@0:8^v16^v24i32Q36", (IMP)qqesignRecallConvertBlocker, "module-convert" },
-        { "QQGProMsgPushManager", "msgRecallMsgNotication:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "gpro-push" },
-        { "QQChatFilesRichMediaHandler", "findRecallModelAndRemove:", "B24@0:8@16", (IMP)qqesignRecallBoolOneObjectBlocker, "chat-files-richmedia" },
-        { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNotiForGProMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-gpro" },
-        { "QQChatFilesViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "chat-files-alert" },
-        { "QQRichMediaChatImagePhotoBrowserViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "richmedia-alert" },
-        { "QQAIOCell", "updateCellViewRecall", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "aio-cell-recall" },
-        { "QQAIOFloatingVideoView", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "aio-floating-video" },
-        { "QQWSFloatingVideoViewManager", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "ws-floating-video" },
-        { "_TtC9NTAIOChat17NTAIOFloatEarPart", "recallMessageWithNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear-part" },
-        { "NTGuildMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-listener" },
-        { "_TtC13GuildNTKernel20SWIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-swift-listener" },
-        { "KTIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "kti-listener" },
-        { "NTGameTempAioMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "game-temp-listener" },
-        { "ThirdAppUploadPicService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "third-upload-pic" },
-        { "ZTPSquareAIOMessageService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "ztp-square" },
-        { "GProSDKListener", "onPushRevokeGuild:operatorTinyId:memberTinyId:memberType:guildInfo:channelMap:uncategorizedChannels:categoryList:sourceType:", "v80@0:8q16q24q32i40@44@52@60@68i76", (IMP)qqesignRecallGuildPushBlocker, "guild-push" },
-        { "NTAIOGrayTipsOtherLinkRecallHandle", "grayTipsEventWithModel:curVC:contact:busiId:", "v44@0:8@16@24@32I40", (IMP)qqesignRecallGrayTipBlocker, "gray-tip" },
-    };
 
-    for (NSUInteger i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
-        Class cls = objc_getClass(specs[i].className);
-        if (!cls) continue;
+    @try {
+        static const QQESignRecallMethodSpec specs[] = {
+            { "QQMessageRecallNetEngine", "parseC2CRecallNotify:bufferLen:subcmd:model:", "B40@0:8r^v16i24i28^{RecallModel=}32", (IMP)qqesignRecallNetEngineBlocker, "net-parse" },
+            { "QQMessageRecallModule", "handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:", "@48@0:8r^v16i24i28Q32^B40", (IMP)qqesignRecallModuleFullBlocker, "module-full" },
+            { "QSideAccountAssistantService", "handleSideAccountRecallNotify:bindUin:tracelessFlag:", "v36@0:8@16Q24B32", (IMP)qqesignRecallSideAccountShortBlocker, "module-short" },
+            { "_TtC15AIOPhotoBrowser31NTAIOPhotoBrowserViewController", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "photo-browser-receive" },
+            { "_TtC9NTAIOChat21NTStreamMsgAIOHandler", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "stream-receive" },
+            { "_TtC9NTAIOChat20NTAIOFloatEarManager", "onRecvRecallMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear" },
+            { "NTFAViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-view" },
+            { "QQChatFilesViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "chat-files" },
+            { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-browser" },
+            { "MQZoneUploadPhotoViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "mqzone-upload" },
+            { "QQTinyVideoImageView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "tiny-video" },
+            { "FAVideoPlayerView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-video" },
+            { "QQFloatingViewManager", "msgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "floating-view" },
+            { "QQMessageDecouplingBridge", "recallMessagePair:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "decoupling-bridge" },
+            { "QQMessageRecallModule", "convertRecallItemToMsg:recallModel:msgType:bindUin:", "@44@0:8^v16^v24i32Q36", (IMP)qqesignRecallConvertBlocker, "module-convert" },
+            { "QQGProMsgPushManager", "msgRecallMsgNotication:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "gpro-push" },
+            { "QQChatFilesRichMediaHandler", "findRecallModelAndRemove:", "B24@0:8@16", (IMP)qqesignRecallBoolOneObjectBlocker, "chat-files-richmedia" },
+            { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNotiForGProMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-gpro" },
+            { "QQChatFilesViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "chat-files-alert" },
+            { "QQRichMediaChatImagePhotoBrowserViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "richmedia-alert" },
+            { "QQAIOCell", "updateCellViewRecall", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "aio-cell-recall" },
+            { "QQAIOFloatingVideoView", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "aio-floating-video" },
+            { "QQWSFloatingVideoViewManager", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "ws-floating-video" },
+            { "_TtC9NTAIOChat17NTAIOFloatEarPart", "recallMessageWithNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear-part" },
+            { "NTGuildMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-listener" },
+            { "_TtC13GuildNTKernel20SWIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-swift-listener" },
+            { "KTIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "kti-listener" },
+            { "NTGameTempAioMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "game-temp-listener" },
+            { "ThirdAppUploadPicService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "third-upload-pic" },
+            { "ZTPSquareAIOMessageService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "ztp-square" },
+            { "GProSDKListener", "onPushRevokeGuild:operatorTinyId:memberTinyId:memberType:guildInfo:channelMap:uncategorizedChannels:categoryList:sourceType:", "v80@0:8q16q24q32i40@44@52@60@68i76", (IMP)qqesignRecallGuildPushBlocker, "guild-push" },
+            { "NTAIOGrayTipsOtherLinkRecallHandle", "grayTipsEventWithModel:curVC:contact:busiId:", "v44@0:8@16@24@32I40", (IMP)qqesignRecallGrayTipBlocker, "gray-tip" },
+        };
 
-        installed += qqesignSwizzleRecallMethodOnClass(cls,
-                                                       specs[i].selName,
-                                                       specs[i].typeEncoding,
-                                                       specs[i].newImp,
-                                                       specs[i].tag);
+        for (NSUInteger i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+            Class cls = objc_getClass(specs[i].className);
+            if (!cls) continue;
+
+            installed += qqesignSwizzleRecallMethodOnClass(cls,
+                                                           specs[i].selName,
+                                                           specs[i].typeEncoding,
+                                                           specs[i].newImp,
+                                                           specs[i].tag);
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[QQESign] 防撤回安装异常: %@ %@", e.name, e.reason);
     }
-
-    installed += qqesignInstallRecallHooksBySelector("recallMessagePair:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-recall-pair");
-    installed += qqesignInstallRecallHooksBySelector("msgRecallMsgNotication:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-gpro-push");
-    installed += qqesignInstallRecallHooksBySelector("findRecallModelAndRemove:", "B24@0:8@16", (IMP)qqesignRecallBoolOneObjectBlocker, "scan-find-recall-model");
-    installed += qqesignInstallRecallHooksBySelector("msgRecallMsgNotiForGProMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-richmedia-gpro");
-    installed += qqesignInstallRecallHooksBySelector("recallMessageWithNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-float-ear");
-    installed += qqesignInstallRecallHooksBySelector("floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "scan-floating-video");
-    installed += qqesignInstallRecallHooksBySelector("updateCellViewRecall", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "scan-aio-cell-recall");
-    installed += qqesignInstallRecallHooksBySelector("onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "scan-kernel-listener");
 
     if (installed > 0) {
         NSLog(@"[QQESign] %s 本轮新增防撤回 Hook: %lu", (reason ? reason : "anti-recall"), (unsigned long)installed);
+    } else {
+        NSLog(@"[QQESign] %s 本轮未新增防撤回 Hook", (reason ? reason : "anti-recall"));
     }
     return installed;
 }
@@ -658,7 +592,9 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
 static void qqesignRecallImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide) {
     (void)mh;
     (void)vmaddr_slide;
-    dispatch_async(dispatch_get_main_queue(), ^{
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
         qqesignInstallRecallHooksPass("dyld-add-image");
     });
 }
@@ -666,10 +602,14 @@ static void qqesignRecallImageAdded(const struct mach_header *mh, intptr_t vmadd
 static void qqesignInstallRecallHooksWithRetry(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        qqesignInstallRecallHooksPass("ctor");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            qqesignInstallRecallHooksPass("delayed-ctor");
+        });
+
         _dyld_register_func_for_add_image(qqesignRecallImageAdded);
 
-        NSArray<NSNumber *> *delays = @[@0.8, @2.0, @5.0, @10.0, @20.0, @40.0];
+        NSArray<NSNumber *> *delays = @[@3.0, @8.0, @15.0];
         for (NSNumber *delay in delays) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -678,6 +618,7 @@ static void qqesignInstallRecallHooksWithRetry(void) {
         }
     });
 }
+
 #pragma mark - 2. 闪照 — ObjC层 (OCPicElement / QQBasePhoto)
 // ─────────────────────────────────────────────
 // 两个类均经过 ObjC classlist 解析确认，isFlashPic / setIsFlashPic: 均存在于方法表中。
