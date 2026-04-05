@@ -38,25 +38,70 @@ jobs:
       - name: Install ldid
         run: brew install ldid || true
 
-      - name: Build dylib
+      - name: Build dylib (Logos + clang, no Theos tweak.mk)
         run: |
           set -e
           export THEOS=/opt/theos
-          export ARCHS=arm64
-          SDK=$(ls /opt/theos/sdks/ | grep iPhoneOS | sort -V | tail -1 | sed 's/\.sdk//')
-          export TARGET="iphone:clang:${SDK}:10.0"
-          echo "Building with SDK: $SDK TARGET: $TARGET"
-          make clean
-          make STRIP=1
-          find .theos/obj -name "QQESign.dylib" -o -name "libQQESign.dylib" | head -5
+          SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDKROOT"
+
+          # Step 1: Logos preprocess (.x -> .m)
+          # %config(generator=internal) is in source file — ensures internal generator
+          LOGOS=$(find "$THEOS" -name "logos.pl" -path "*/bin/*" | head -1)
+          echo "Using Logos: $LOGOS"
+          perl "$LOGOS" Tweak.x > Tweak.x.m
+          echo "=== Logos preprocessing done ==="
+
+          # Verify: internal generator should NOT produce MSHookMessageEx calls
+          if grep -q 'MSHookMessageEx\|MSHookFunction\|HBLogDebug' Tweak.x.m; then
+            echo "ERROR: Logos output contains Substrate calls! Generator=internal not working"
+            echo "--- checking for substrate references ---"
+            grep -n 'MSHook\|substrate\|Substrate' Tweak.x.m || true
+            exit 1
+          fi
+          echo "OK: no Substrate references in preprocessed code"
+
+          # Verify: should contain objc runtime calls (proof internal generator worked)
+          if grep -q 'method_setImplementation\|class_getInstanceMethod' Tweak.x.m; then
+            echo "OK: internal generator produced ObjC runtime hooks"
+          else
+            echo "WARNING: no ObjC runtime hook calls found, hooks may not work"
+          fi
+
+          # Step 2: Compile + link dylib directly (zero substrate dependency)
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -miphoneos-version-min=10.0 \
+            -isysroot "$SDKROOT" \
+            -fobjc-arc -DQQESIGN_SIDELOAD=1 \
+            -dynamiclib \
+            -install_name @rpath/QQESign.dylib \
+            -framework UIKit -framework Foundation \
+            -framework CoreGraphics -framework Photos \
+            -o QQESign.dylib Tweak.x.m
+
+          echo "Build succeeded"
+
+      - name: Verify dylib
+        run: |
+          set -e
+          echo "=== file ==="
+          file QQESign.dylib
+          echo "=== lipo ==="
+          lipo -info QQESign.dylib
+          echo "=== otool -L (dependencies) ==="
+          otool -L QQESign.dylib
+          echo "=== check no substrate ==="
+          if otool -L QQESign.dylib | grep -i substrate; then
+            echo "ERROR: dylib links against CydiaSubstrate!"
+            exit 1
+          fi
+          echo "OK: no substrate dependency"
 
       - name: Collect artifacts
         run: |
           set -e
           mkdir -p dist
-          # library.mk may output as QQESign.dylib or libQQESign.dylib
-          find .theos/obj \( -name "QQESign.dylib" -o -name "libQQESign.dylib" \) -exec cp {} dist/QQESign.dylib \;
-          test -f dist/QQESign.dylib
+          cp QQESign.dylib dist/
           ls -la dist/
 
       - name: Upload artifact

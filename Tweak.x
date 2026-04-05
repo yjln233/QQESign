@@ -1,6 +1,8 @@
 // QQESign — 免越狱轻松签版
 // 防撤回 / 闪照保存+无限查看 / 自定义设备名+电量
 // Target: com.tencent.mqq (arm64) — sideload injection
+
+%config(generator=internal)
 //
 // 与越狱版区别：
 //   1. 使用 Logos internal generator (ObjC runtime)，无需 CydiaSubstrate
