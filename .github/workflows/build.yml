@@ -42,9 +42,9 @@ jobs:
         run: |
           set -e
           export THEOS=/opt/theos
-          export ARCHS=arm64e
+          export ARCHS=arm64
           SDK=$(ls /opt/theos/sdks/ | grep iPhoneOS | sort -V | tail -1 | sed 's/\.sdk//')
-          export TARGET="iphone:clang:${SDK}:15.0"
+          export TARGET="iphone:clang:${SDK}:10.0"
           echo "Building with SDK: $SDK TARGET: $TARGET"
           make clean
           make STRIP=1
@@ -61,7 +61,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QQESign-arm64e
+          name: QQESign-arm64
           path: dist/QQESign.dylib
           if-no-files-found: error
 
@@ -72,7 +72,7 @@ jobs:
           tag_name: v1.0.${{ github.run_number }}
           name: QQESign v1.0.${{ github.run_number }}
           body: |
-            QQESign arm64e dylib
+            QQESign arm64 dylib
 
             Commit: ${{ github.sha }}
           files: dist/QQESign.dylib

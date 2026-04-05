@@ -1,5 +1,5 @@
-ARCHS = arm64e
-TARGET = iphone:clang:latest:15.0
+ARCHS = arm64
+TARGET = iphone:clang:latest:10.0
 
 LOGOS_DEFAULT_GENERATOR = internal
 

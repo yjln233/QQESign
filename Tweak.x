@@ -1,6 +1,6 @@
 // QQESign — 免越狱轻松签版
 // 防撤回 / 闪照保存+无限查看 / 自定义设备名+电量
-// Target: com.tencent.mqq (arm64e) — sideload injection
+// Target: com.tencent.mqq (arm64) — sideload injection
 //
 // 与越狱版区别：
 //   1. 使用 Logos internal generator (ObjC runtime)，无需 CydiaSubstrate
@@ -73,7 +73,11 @@ static void loadPrefs(void) {
 static void saveImageToCameraRoll(UIImage *image) {
     if (!image) return;
     PHAuthorizationStatus s = [PHPhotoLibrary authorizationStatus];
-    if (s == PHAuthorizationStatusAuthorized || s == PHAuthorizationStatusLimited) {
+    BOOL authorized = (s == PHAuthorizationStatusAuthorized);
+    if (@available(iOS 14.0, *)) {
+        authorized = authorized || (s == PHAuthorizationStatusLimited);
+    }
+    if (authorized) {
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
             [PHAssetChangeRequest creationRequestForAssetFromImage:image];
         } completionHandler:^(BOOL ok, NSError *err) {
@@ -102,16 +106,26 @@ static UIImage *findImageInView(UIView *root) {
 }
 
 static UIWindow *activeForegroundWindow(void) {
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            if (window.isKeyWindow) return window;
+    UIApplication *app = [UIApplication sharedApplication];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                if (window.isKeyWindow) return window;
+            }
+            for (UIWindow *window in windowScene.windows) {
+                if (!window.hidden) return window;
+            }
         }
-        for (UIWindow *window in windowScene.windows) {
-            if (!window.hidden) return window;
-        }
+    }
+    if (app.keyWindow) return app.keyWindow;
+    for (UIWindow *window in app.windows) {
+        if (window.isKeyWindow) return window;
+    }
+    for (UIWindow *window in app.windows) {
+        if (!window.hidden) return window;
     }
     return nil;
 }
@@ -284,11 +298,36 @@ static void showQQESignSettings(void) {
         UIViewController *root = win.rootViewController;
         while (root.presentedViewController) root = root.presentedViewController;
 
-        QQESignSettingsController *vc = [[QQESignSettingsController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        UITableViewStyle style = UITableViewStyleGrouped;
+        if (@available(iOS 13.0, *)) {
+            style = UITableViewStyleInsetGrouped;
+        }
+        QQESignSettingsController *vc = [[QQESignSettingsController alloc] initWithStyle:style];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
         nav.modalPresentationStyle = UIModalPresentationFormSheet;
         [root presentViewController:nav animated:YES completion:nil];
     });
+}
+
+static void installSettingsEntryButton(UIViewController *vc, id target, SEL action) {
+    if (!vc) return;
+
+    for (UIBarButtonItem *item in vc.navigationItem.rightBarButtonItems) {
+        if ([item.title isEqualToString:@"ESign"]) return;
+    }
+    if ([vc.navigationItem.rightBarButtonItem.title isEqualToString:@"ESign"]) return;
+
+    UIBarButtonItem *btn = [[UIBarButtonItem alloc] initWithTitle:@"ESign"
+                                                           style:UIBarButtonItemStylePlain
+                                                          target:target
+                                                          action:action];
+    if (vc.navigationItem.rightBarButtonItems.count > 0) {
+        NSMutableArray *items = [vc.navigationItem.rightBarButtonItems mutableCopy];
+        [items addObject:btn];
+        vc.navigationItem.rightBarButtonItems = items;
+    } else {
+        vc.navigationItem.rightBarButtonItem = btn;
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -479,42 +518,58 @@ static void hookRevokeClasses(void) {
 
 %end
 
-%hook NSObject
-
-- (NSString *)currentDeviceName {
-    if (pref_fakeDevice) return pref_deviceName;
-    return %orig;
-}
-
-- (NSString *)getDeviceName {
-    if (pref_fakeDevice) return pref_deviceName;
-    return %orig;
-}
-
-%end
-
 // ─────────────────────────────────────────────
 #pragma mark - 5. 设置入口 — Hook QQ 设置页
 // ─────────────────────────────────────────────
 
-// 方式一：在 QQ "我的" 页面的导航栏添加一个入口按钮
-// QQSettingViewController 是 QQ 设置主页面
-%hook QQSettingViewController
+// 方式一：在 QQ 设置相关页面的导航栏添加入口按钮
+%hook QQSettingsViewController
 
-- (void)viewDidLoad {
+- (void)viewWillAppear:(BOOL)animated {
     %orig;
-    UIViewController *vc = (UIViewController *)self;
-    UIBarButtonItem *btn = [[UIBarButtonItem alloc] initWithTitle:@"ESign"
-                                                           style:UIBarButtonItemStylePlain
-                                                          target:self
-                                                          action:@selector(qqesign_openSettings)];
-    if (vc.navigationItem.rightBarButtonItems.count > 0) {
-        NSMutableArray *items = [vc.navigationItem.rightBarButtonItems mutableCopy];
-        [items addObject:btn];
-        vc.navigationItem.rightBarButtonItems = items;
-    } else {
-        vc.navigationItem.rightBarButtonItem = btn;
-    }
+    installSettingsEntryButton((UIViewController *)self, self, @selector(qqesign_openSettings));
+}
+
+%new
+- (void)qqesign_openSettings {
+    showQQESignSettings();
+}
+
+%end
+
+%hook QQNewSettingsViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    installSettingsEntryButton((UIViewController *)self, self, @selector(qqesign_openSettings));
+}
+
+%new
+- (void)qqesign_openSettings {
+    showQQESignSettings();
+}
+
+%end
+
+%hook QQSettingsBaseViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    installSettingsEntryButton((UIViewController *)self, self, @selector(qqesign_openSettings));
+}
+
+%new
+- (void)qqesign_openSettings {
+    showQQESignSettings();
+}
+
+%end
+
+%hook QQBaseSettingsViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    installSettingsEntryButton((UIViewController *)self, self, @selector(qqesign_openSettings));
 }
 
 %new
@@ -544,7 +599,7 @@ static void hookRevokeClasses(void) {
     @autoreleasepool {
         loadPrefs();
         hookRevokeClasses();
-        NSLog(@"[QQESign] Loaded — sideload/arm64e (antiRevoke=%d flashSave=%d flashUnlim=%d fakeDevice=%d fakeBatt=%d)",
+        NSLog(@"[QQESign] Loaded — sideload/arm64 (antiRevoke=%d flashSave=%d flashUnlim=%d fakeDevice=%d fakeBatt=%d)",
               pref_antiRevoke, pref_flashSave, pref_flashUnlimited,
               pref_fakeDevice, pref_fakeBattery);
     }
