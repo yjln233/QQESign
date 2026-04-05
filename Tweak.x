@@ -12,8 +12,8 @@
 // 确认在当前版本 QQ 二进制中实际存在。
 //
 // 防撤回：
-//   NT 撤回流通过 NSNotification 通知 UI 层更新。
-//   hook 各 VC 的 msgRecallMsgNoti: / onMsgRecall: 使其空转。
+//   NT 撤回流：网络解析(QQMessageRecallNetEngine) → 模块处理(QQMessageRecallModule)
+//   → UI灰条(NTAIOGrayTipsOtherLinkRecallHandle)。三层全部拦截。
 //
 // 闪照：
 //   OCPicElement / QQBasePhoto.isFlashPic 返回 NO 即可解除
@@ -275,49 +275,48 @@ static void addESignButton(UIViewController *vc, SEL action) {
 }
 
 // ─────────────────────────────────────────────
-#pragma mark - 1. 防撤回 — 通知中心层拦截
+#pragma mark - 1. 防撤回 — 模块层拦截 (NT架构)
 // ─────────────────────────────────────────────
-// NT QQ 的撤回流程：
-//   NT kernel → NSNotification → 各 UI 组件更新
+// NT QQ 撤回真实链路（ObjC classlist 验证）：
+//   网络层解析 → QQMessageRecallNetEngine     (parseC2CRecallNotify:...)
+//   模块处理层 → QQMessageRecallModule        (handleSideAccountRecallNotify:...)
+//   灰条展示层 → NTAIOGrayTipsOtherLinkRecallHandle (grayTipsEventWithModel:...)
 //
-// 在 NSNotificationCenter 的 post 环节直接拦截，
-// 比 hook 具体 VC 更可靠（覆盖所有聊天场景）。
-//
-// 已验证的撤回通知名（从 QQ 二进制 strings 中提取）：
-//   __QQReceiveRecallMsgNotification__           — 普通 C2C/群 撤回
-//   __QQGProReceiveRecallMsgNotifications__      — 频道 撤回
-//   __QQReceiveRecallForVideoStopNotification__  — 视频停止
-//   __QQReceiveRecallFormFileNotification__      — 文件撤回
+// NSNotification 方案已验证无效（NT 架构 UI 通过 KVO/数据绑定更新）。
+// 改为在 ObjC 模块层直接拦截，多层叠加保证覆盖各种聊天场景。
 
-static BOOL isRecallNotification(NSString *name) {
-    if (!name) return NO;
-    return ([name isEqualToString:@"__QQReceiveRecallMsgNotification__"] ||
-            [name isEqualToString:@"__QQGProReceiveRecallMsgNotifications__"] ||
-            [name isEqualToString:@"__QQReceiveRecallForVideoStopNotification__"] ||
-            [name isEqualToString:@"__QQReceiveRecallFormFileNotification__"]);
-}
+// 层1: 网络解析层 — C2C 撤回协议包解析入口（最早截断点）
+%hook QQMessageRecallNetEngine
 
-%hook NSNotificationCenter
-
-- (void)postNotificationName:(NSString *)name object:(id)object {
-    if (pref_antiRevoke && isRecallNotification(name)) {
-        NSLog(@"[QQESign] 拦截撤回通知: %@", name);
+- (void)parseC2CRecallNotify:(id)data bufferLen:(NSUInteger)len subcmd:(int)subcmd model:(id)model {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截 C2C 撤回解析");
         return;
     }
     %orig;
 }
 
-- (void)postNotificationName:(NSString *)name object:(id)object userInfo:(NSDictionary *)userInfo {
-    if (pref_antiRevoke && isRecallNotification(name)) {
-        NSLog(@"[QQESign] 拦截撤回通知: %@", name);
+%end
+
+// 层2: 模块处理层 — 账号撤回通知处理（C2C + 群均经过此处）
+%hook QQMessageRecallModule
+
+- (void)handleSideAccountRecallNotify:(id)data bufferLen:(NSUInteger)len subcmd:(int)subcmd bindUin:(unsigned long long)uin tracelessFlag:(int)flag {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截 QQMessageRecallModule handleSideAccountRecallNotify");
         return;
     }
     %orig;
 }
 
-- (void)postNotification:(NSNotification *)notification {
-    if (pref_antiRevoke && isRecallNotification(notification.name)) {
-        NSLog(@"[QQESign] 拦截撤回通知: %@", notification.name);
+%end
+
+// 层3: UI 灰条层 — 拦截"xxx 撤回了一条消息"灰色提示渲染
+%hook NTAIOGrayTipsOtherLinkRecallHandle
+
+- (void)grayTipsEventWithModel:(id)model curVC:(id)vc contact:(id)contact busiId:(id)busiId {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回灰条渲染");
         return;
     }
     %orig;
