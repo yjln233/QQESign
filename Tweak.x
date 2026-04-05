@@ -600,6 +600,7 @@ static void hookRevokeClasses(void) {
 %ctor {
     @autoreleasepool {
         loadPrefs();
+        %init;
         hookRevokeClasses();
         NSLog(@"[QQESign] Loaded — sideload/arm64 (antiRevoke=%d flashSave=%d flashUnlim=%d fakeDevice=%d fakeBatt=%d)",
               pref_antiRevoke, pref_flashSave, pref_flashUnlimited,
