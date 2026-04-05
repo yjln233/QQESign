@@ -1,0 +1,118 @@
+name: Build QQESign (arm64e sideload)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build dylib (arm64e)
+    runs-on: macos-latest
+
+    steps:
+      # ── 1. 拉取代码 ──────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── 2. 安装 Theos ────────────────────────────────────────────
+      - name: Install Theos
+        run: |
+          set -e
+          sudo mkdir -p /opt/theos
+          sudo chown $USER /opt/theos
+          git clone --recursive https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+
+      # ── 3. 下载 iOS SDK ──────────────────────────────────────────
+      - name: Download iOS SDK
+        run: |
+          set -e
+          mkdir -p /opt/theos/sdks
+          cd /opt/theos/sdks
+          curl -fL --retry 3 --retry-all-errors -O https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          tar -xJf iPhoneOS16.5.sdk.tar.xz
+          rm -f iPhoneOS16.5.sdk.tar.xz
+          ls /opt/theos/sdks/
+
+      # ── 4. 安装 ldid ────────────────────────────────────────────
+      - name: Install ldid
+        run: |
+          brew install ldid || true
+
+      # ── 5. 构建 dylib ───────────────────────────────────────────
+      - name: Build dylib
+        run: |
+          set -e
+          export THEOS=/opt/theos
+          export ARCHS="arm64e"
+          SDK=$(ls /opt/theos/sdks/ | grep iPhoneOS | sort -V | tail -1 | sed 's/\.sdk//')
+          export TARGET="iphone:clang:${SDK}:15.0"
+          echo "Building with SDK: $SDK  TARGET: $TARGET"
+          make clean
+          make FINALPACKAGE=1 STRIP=1
+          echo "--- Build output ---"
+          find .theos/obj -name "*.dylib" -o -name "*.deb" | head -20
+
+      # ── 6. 收集产物 ─────────────────────────────────────────────
+      - name: Collect artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          # 复制 dylib
+          find .theos/obj -name "QQESign.dylib" -exec cp {} dist/ \;
+          # 如果生成了 deb 也复制
+          find packages -name "*.deb" -exec cp {} dist/ \; 2>/dev/null || true
+          # 复制注入脚本
+          cp inject.sh dist/
+          chmod +x dist/inject.sh
+          ls -la dist/
+
+      # ── 7. 上传产物 ─────────────────────────────────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QQESign-arm64e
+          path: dist/*
+          if-no-files-found: error
+
+      # ── 8. 自动发布 Release ─────────────────────────────────────
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "QQESign v1.0.${{ github.run_number }}"
+          body: |
+            ## QQESign — 免越狱 QQ 插件 (arm64e)
+
+            自动构建 — Commit: ${{ github.sha }}
+
+            ### 功能
+            - 防撤回（Swift + ObjC 双层拦截）
+            - 闪照自动保存到相册 + 无限次查看
+            - 自定义设备名
+            - 自定义电量和充电状态
+            - 应用内设置界面（设置页右上角 ESign 按钮 / 摇一摇）
+
+            ### 使用方法
+            1. 下载 `QQESign.dylib` 和 `inject.sh`
+            2. 准备一个未签名的 QQ IPA
+            3. 运行 `./inject.sh QQ.ipa` 生成注入后的 IPA
+            4. 使用「轻松签」/ AltStore / Sideloadly 安装
+            5. 打开 QQ → 设置 → 右上角「ESign」按钮调整配置
+
+            ### 无需越狱，无需 substrate
+            使用 ObjC runtime 原生 swizzling，兼容 arm64e 设备。
+          files: dist/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
