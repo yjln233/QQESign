@@ -24,7 +24,6 @@
 // ─────────────────────────────────────────────
 
 static NSString *const kPrefSuite = @"com.qqesign.prefs";
-
 static BOOL   pref_antiRevoke     = YES;
 static BOOL   pref_flashSave      = YES;
 static BOOL   pref_flashUnlimited = YES;
@@ -313,7 +312,6 @@ static void showQQESignSettings(void) {
 
 static void installSettingsEntryButton(UIViewController *vc, id target, SEL action) {
     if (!vc) return;
-
     for (UIBarButtonItem *item in vc.navigationItem.rightBarButtonItems) {
         if ([item.title isEqualToString:@"ESign"]) return;
     }
@@ -367,7 +365,6 @@ static BOOL hookRevokeClasses(void) {
 
     NSUInteger hookedCount = 0;
     SEL allocSel = @selector(alloc);
-
     for (int i = 0; i < 3; i++) {
         const char *className = kQQESignRevokeClassNames[i];
         if (gQQESignRevokeClassHooked[i]) {
@@ -396,7 +393,6 @@ static BOOL hookRevokeClasses(void) {
             }
             return ((id(*)(id, SEL))origIMP)(self_, allocSel);
         });
-
         class_replaceMethod(meta, allocSel, newIMP, method_getTypeEncoding(m));
         gQQESignRevokeClassHooked[i] = YES;
         hookedCount++;
@@ -413,12 +409,10 @@ static BOOL hookRevokeClasses(void) {
 }
 
 static void scheduleRevokeHookRetryAfter(NSTimeInterval delay);
-
 static void performRevokeHookRetry(void) {
     gQQESignRevokeRetryScheduled = NO;
 
     if (hookRevokeClasses()) return;
-
     if (gQQESignRevokeRetryCount >= kQQESignRevokeMaxRetries) {
         NSLog(@"[QQESign] Swift 撤回类多次重试后仍未全部就绪，等待应用再次激活后继续尝试");
         return;
@@ -430,7 +424,6 @@ static void performRevokeHookRetry(void) {
 
 static void scheduleRevokeHookRetryAfter(NSTimeInterval delay) {
     if (gQQESignRevokeHooksReady || gQQESignRevokeRetryScheduled) return;
-
     gQQESignRevokeRetryScheduled = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -470,6 +463,11 @@ static void installRevokeHookObservers(void) {
         }];
     });
 }
+
+// ==========================================
+// 核心分组 1: QQ 业务类（需延迟初始化）
+// ==========================================
+%group QQBusinessHooks
 
 // ─────────────────────────────────────────────
 #pragma mark - 1. 防撤回 — ObjC layer
@@ -592,6 +590,13 @@ static void installRevokeHookObservers(void) {
 
 %end
 
+%end // 结束 QQBusinessHooks 分组
+
+// ==========================================
+// 核心分组 2: 系统级类（可立即初始化）
+// ==========================================
+%group SystemHooks
+
 // ─────────────────────────────────────────────
 #pragma mark - 3+4. 自定义设备名 / 电量 / 充电状态
 // ─────────────────────────────────────────────
@@ -608,8 +613,7 @@ static void installRevokeHookObservers(void) {
 
 - (UIDeviceBatteryState)batteryState {
     if (pref_fakeBattery) {
-        return pref_isCharging ? UIDeviceBatteryStateCharging
-                               : UIDeviceBatteryStateUnplugged;
+        return pref_isCharging ? UIDeviceBatteryStateCharging : UIDeviceBatteryStateUnplugged;
     }
     return %orig;
 }
@@ -620,7 +624,6 @@ static void installRevokeHookObservers(void) {
 #pragma mark - 5. 设置入口 — Hook QQ 设置页
 // ─────────────────────────────────────────────
 
-// 方式一：在 QQ 设置相关页面的导航栏添加入口按钮
 %hook QQSettingsViewController
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -677,7 +680,6 @@ static void installRevokeHookObservers(void) {
 
 %end
 
-// 方式二（后备）：摇一摇打开设置
 %hook UIWindow
 
 - (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
@@ -689,6 +691,9 @@ static void installRevokeHookObservers(void) {
 
 %end
 
+%end // 结束 SystemHooks 分组
+
+
 // ─────────────────────────────────────────────
 #pragma mark - Constructor
 // ─────────────────────────────────────────────
@@ -696,9 +701,20 @@ static void installRevokeHookObservers(void) {
 %ctor {
     @autoreleasepool {
         loadPrefs();
-        %init;
+        
+        // 1. 立即初始化系统及设置界面的 Hook（确保电量、摇一摇、设置按钮立刻生效）
+        %init(SystemHooks);
+        
+        // 2. 延迟 3 秒初始化 QQ 业务相关 Hook（解决闪照和 Objective-C 防撤回失效的问题）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            %init(QQBusinessHooks);
+            NSLog(@"[QQESign] 业务类 Hook (防撤回/闪照) 已加载");
+        });
+
+        // 3. 启动 Swift 撤回类的重试监听机制（你新加的机制，保留不动）
         installRevokeHookObservers();
         restartRevokeHookRetryWindow(3.0, @"ctor initial delay");
+        
         NSLog(@"[QQESign] Loaded — sideload/arm64 (antiRevoke=%d flashSave=%d flashUnlim=%d fakeDevice=%d fakeBatt=%d)",
               pref_antiRevoke, pref_flashSave, pref_flashUnlimited,
               pref_fakeDevice, pref_fakeBattery);
