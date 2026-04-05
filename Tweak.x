@@ -335,33 +335,60 @@ static void installSettingsEntryButton(UIViewController *vc, id target, SEL acti
 // ─────────────────────────────────────────────
 #pragma mark - Dynamic revoke hooks (Swift classes)
 // ─────────────────────────────────────────────
-// QQ NT 的撤回灰色提示类是 Swift 类，在 %ctor 中使用 runtime 动态 hook
+// QQ NT 的撤回灰色提示类是 Swift 类，轻松签注入时机往往早于业务模块完成类注册，需要延迟重试。
 
-static void hookRevokeClasses(void) {
-    const char *classNames[] = {
-        "_TtC9NTAIOChat24NTAIORevokeGrayTipsModel",
-        "_TtC9NTAIOChat28NTAIOChatRevokeGrayTipsModel",
-        "_TtC9NTAIOChat26NTAIORichRevokeTipsElement",
-    };
+static const char *kQQESignRevokeClassNames[] = {
+    "_TtC9NTAIOChat24NTAIORevokeGrayTipsModel",
+    "_TtC9NTAIOChat28NTAIOChatRevokeGrayTipsModel",
+    "_TtC9NTAIOChat26NTAIORichRevokeTipsElement",
+};
+static BOOL gQQESignRevokeClassHooked[] = { NO, NO, NO };
+static BOOL gQQESignRevokeHooksReady = NO;
+static BOOL gQQESignRevokeRetryScheduled = NO;
+static NSUInteger gQQESignRevokeRetryCount = 0;
+static const NSUInteger kQQESignRevokeMaxRetries = 8;
+static id gQQESignDidFinishLaunchingObserver = nil;
+static id gQQESignDidBecomeActiveObserver = nil;
 
+static void removeRevokeHookObservers(void) {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    if (gQQESignDidFinishLaunchingObserver) {
+        [center removeObserver:gQQESignDidFinishLaunchingObserver];
+        gQQESignDidFinishLaunchingObserver = nil;
+    }
+    if (gQQESignDidBecomeActiveObserver) {
+        [center removeObserver:gQQESignDidBecomeActiveObserver];
+        gQQESignDidBecomeActiveObserver = nil;
+    }
+}
+
+static BOOL hookRevokeClasses(void) {
+    if (gQQESignRevokeHooksReady) return YES;
+
+    NSUInteger hookedCount = 0;
     SEL allocSel = @selector(alloc);
 
     for (int i = 0; i < 3; i++) {
-        const char *className = classNames[i];
+        const char *className = kQQESignRevokeClassNames[i];
+        if (gQQESignRevokeClassHooked[i]) {
+            hookedCount++;
+            continue;
+        }
+
         Class cls = objc_getClass(className);
         if (!cls) {
-            NSLog(@"[QQESign] 未找到类: %s", className);
+            NSLog(@"[QQESign] Swift 撤回类尚未注册: %s", className);
             continue;
         }
 
         Class meta = object_getClass(cls);
         Method m = class_getClassMethod(cls, allocSel);
-        if (!m) continue;
+        if (!meta || !m) {
+            NSLog(@"[QQESign] Swift 撤回类缺少 +alloc: %s", className);
+            continue;
+        }
 
-        // 保存原始 IMP
         __block IMP origIMP = method_getImplementation(m);
-
-        // 创建新的 block-based IMP
         IMP newIMP = imp_implementationWithBlock(^id(id self_) {
             if (pref_antiRevoke) {
                 NSLog(@"[QQESign] 拦截撤回类 alloc: %s", className);
@@ -371,8 +398,77 @@ static void hookRevokeClasses(void) {
         });
 
         class_replaceMethod(meta, allocSel, newIMP, method_getTypeEncoding(m));
+        gQQESignRevokeClassHooked[i] = YES;
+        hookedCount++;
         NSLog(@"[QQESign] Hooked +alloc on %s", className);
     }
+
+    gQQESignRevokeHooksReady = (hookedCount == 3);
+    if (gQQESignRevokeHooksReady) {
+        NSLog(@"[QQESign] Swift 撤回类 Hook 已全部安装");
+        removeRevokeHookObservers();
+    }
+
+    return gQQESignRevokeHooksReady;
+}
+
+static void scheduleRevokeHookRetryAfter(NSTimeInterval delay);
+
+static void performRevokeHookRetry(void) {
+    gQQESignRevokeRetryScheduled = NO;
+
+    if (hookRevokeClasses()) return;
+
+    if (gQQESignRevokeRetryCount >= kQQESignRevokeMaxRetries) {
+        NSLog(@"[QQESign] Swift 撤回类多次重试后仍未全部就绪，等待应用再次激活后继续尝试");
+        return;
+    }
+
+    gQQESignRevokeRetryCount++;
+    scheduleRevokeHookRetryAfter(1.0);
+}
+
+static void scheduleRevokeHookRetryAfter(NSTimeInterval delay) {
+    if (gQQESignRevokeHooksReady || gQQESignRevokeRetryScheduled) return;
+
+    gQQESignRevokeRetryScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        performRevokeHookRetry();
+    });
+}
+
+static void restartRevokeHookRetryWindow(NSTimeInterval initialDelay, NSString *reason) {
+    if (gQQESignRevokeHooksReady || gQQESignRevokeRetryScheduled) return;
+
+    gQQESignRevokeRetryCount = 0;
+    NSLog(@"[QQESign] 开始延迟安装 Swift 撤回 Hook: %@", reason);
+    scheduleRevokeHookRetryAfter(initialDelay);
+}
+
+static void installRevokeHookObservers(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+
+        gQQESignDidFinishLaunchingObserver =
+            [center addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                object:nil
+                                 queue:[NSOperationQueue mainQueue]
+                            usingBlock:^(NSNotification *note) {
+            (void)note;
+            restartRevokeHookRetryWindow(1.0, @"UIApplicationDidFinishLaunchingNotification");
+        }];
+
+        gQQESignDidBecomeActiveObserver =
+            [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                                object:nil
+                                 queue:[NSOperationQueue mainQueue]
+                            usingBlock:^(NSNotification *note) {
+            (void)note;
+            restartRevokeHookRetryWindow(0.5, @"UIApplicationDidBecomeActiveNotification");
+        }];
+    });
 }
 
 // ─────────────────────────────────────────────
@@ -601,7 +697,8 @@ static void hookRevokeClasses(void) {
     @autoreleasepool {
         loadPrefs();
         %init;
-        hookRevokeClasses();
+        installRevokeHookObservers();
+        restartRevokeHookRetryWindow(3.0, @"ctor initial delay");
         NSLog(@"[QQESign] Loaded — sideload/arm64 (antiRevoke=%d flashSave=%d flashUnlim=%d fakeDevice=%d fakeBatt=%d)",
               pref_antiRevoke, pref_flashSave, pref_flashUnlimited,
               pref_fakeDevice, pref_fakeBattery);
