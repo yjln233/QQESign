@@ -25,6 +25,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <Photos/Photos.h>
+#import <mach-o/dyld.h>
 #import <objc/runtime.h>
 #include <stdlib.h>
 #include <string.h>
@@ -287,12 +288,21 @@ typedef struct {
 static QQESignRecallHookRecord gQQESignRecallHooks[64];
 static NSUInteger gQQESignRecallHookCount = 0;
 
-typedef void (*QQEOrigVoidNoArg)(id, SEL);
 typedef void (*QQEOrigVoidOneObj)(id, SEL, id);
-typedef void (*QQEOrigVoidThreeArgs)(id, SEL, id, unsigned long long, int);
-typedef void (*QQEOrigVoidFourArgs)(id, SEL, id, NSUInteger, int, id);
-typedef void (*QQEOrigVoidFiveArgs)(id, SEL, id, NSUInteger, int, unsigned long long, int);
-typedef void (*QQEOrigVoidGrayTip)(id, SEL, id, id, id, id);
+typedef void (*QQEOrigVoidMsgRecall3)(id, SEL, int, id, unsigned long long);
+typedef void (*QQEOrigVoidGuildPush)(id, SEL, long long, long long, long long, int, id, id, id, id, int);
+typedef void (*QQEOrigVoidGrayTip)(id, SEL, id, id, id, unsigned int);
+typedef void (*QQEOrigVoidSideAccountShort)(id, SEL, id, unsigned long long, BOOL);
+typedef id   (*QQEOrigIdRecallModuleFull)(id, SEL, const void *, int, int, unsigned long long, BOOL *);
+typedef BOOL (*QQEOrigBoolRecallNetParse)(id, SEL, const void *, int, int, void *);
+
+typedef struct {
+    const char *className;
+    const char *selName;
+    const char *typeEncoding;
+    IMP newImp;
+    const char *tag;
+} QQESignRecallMethodSpec;
 
 static BOOL qqesignRecallHookExists(Class cls, SEL sel) {
     for (NSUInteger i = 0; i < gQQESignRecallHookCount; i++) {
@@ -345,13 +355,22 @@ static Method qqesignFindOwnInstanceMethod(Class cls, SEL sel) {
     return found;
 }
 
-static BOOL qqesignSwizzleRecallMethodOnClass(Class cls, const char *selName, IMP newImp, const char *tag) {
+static BOOL qqesignSwizzleRecallMethodOnClass(Class cls,
+                                              const char *selName,
+                                              const char *typeEncoding,
+                                              IMP newImp,
+                                              const char *tag) {
     if (!cls || !selName || !newImp) return NO;
 
     SEL sel = sel_registerName(selName);
     Method method = qqesignFindOwnInstanceMethod(cls, sel);
     if (!method) return NO;
     if (qqesignRecallHookExists(cls, sel)) return NO;
+
+    if (typeEncoding) {
+        const char *actualType = method_getTypeEncoding(method);
+        if (!actualType || strcmp(actualType, typeEncoding) != 0) return NO;
+    }
 
     IMP orig = method_getImplementation(method);
     if (!orig || orig == newImp) return NO;
@@ -366,16 +385,6 @@ static BOOL qqesignSwizzleRecallMethodOnClass(Class cls, const char *selName, IM
     return YES;
 }
 
-static void qqesignRecallNoArgBlocker(id self, SEL _cmd) {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截撤回入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
-        return;
-    }
-
-    QQEOrigVoidNoArg orig = (QQEOrigVoidNoArg)qqesignLookupRecallOriginal(self, _cmd);
-    if (orig) orig(self, _cmd);
-}
-
 static void qqesignRecallOneObjectBlocker(id self, SEL _cmd, id arg1) {
     if (pref_antiRevoke) {
         NSLog(@"[QQESign] 拦截撤回入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
@@ -386,37 +395,37 @@ static void qqesignRecallOneObjectBlocker(id self, SEL _cmd, id arg1) {
     if (orig) orig(self, _cmd, arg1);
 }
 
-static void qqesignRecallModuleShortBlocker(id self, SEL _cmd, id data, unsigned long long uin, int flag) {
+static void qqesignRecallMsgRecall3Blocker(id self, SEL _cmd, int arg1, id arg2, unsigned long long arg3) {
     if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQMessageRecallModule short recall");
+        NSLog(@"[QQESign] 拦截撤回入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
         return;
     }
 
-    QQEOrigVoidThreeArgs orig = (QQEOrigVoidThreeArgs)qqesignLookupRecallOriginal(self, _cmd);
-    if (orig) orig(self, _cmd, data, uin, flag);
+    QQEOrigVoidMsgRecall3 orig = (QQEOrigVoidMsgRecall3)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, arg1, arg2, arg3);
 }
 
-static void qqesignRecallNetEngineBlocker(id self, SEL _cmd, id data, NSUInteger len, int subcmd, id model) {
+static void qqesignRecallGuildPushBlocker(id self,
+                                          SEL _cmd,
+                                          long long arg1,
+                                          long long arg2,
+                                          long long arg3,
+                                          int arg4,
+                                          id arg5,
+                                          id arg6,
+                                          id arg7,
+                                          id arg8,
+                                          int arg9) {
     if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQMessageRecallNetEngine parseC2CRecallNotify");
+        NSLog(@"[QQESign] 拦截撤回入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
         return;
     }
 
-    QQEOrigVoidFourArgs orig = (QQEOrigVoidFourArgs)qqesignLookupRecallOriginal(self, _cmd);
-    if (orig) orig(self, _cmd, data, len, subcmd, model);
+    QQEOrigVoidGuildPush orig = (QQEOrigVoidGuildPush)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9);
 }
 
-static void qqesignRecallModuleFullBlocker(id self, SEL _cmd, id data, NSUInteger len, int subcmd, unsigned long long uin, int flag) {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQMessageRecallModule full recall");
-        return;
-    }
-
-    QQEOrigVoidFiveArgs orig = (QQEOrigVoidFiveArgs)qqesignLookupRecallOriginal(self, _cmd);
-    if (orig) orig(self, _cmd, data, len, subcmd, uin, flag);
-}
-
-static void qqesignRecallGrayTipBlocker(id self, SEL _cmd, id model, id vc, id contact, id busiId) {
+static void qqesignRecallGrayTipBlocker(id self, SEL _cmd, id model, id vc, id contact, unsigned int busiId) {
     if (pref_antiRevoke) {
         NSLog(@"[QQESign] 拦截撤回灰条: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
         return;
@@ -426,128 +435,110 @@ static void qqesignRecallGrayTipBlocker(id self, SEL _cmd, id model, id vc, id c
     if (orig) orig(self, _cmd, model, vc, contact, busiId);
 }
 
-static NSUInteger qqesignInstallRecallHooksPass(void) {
-    NSUInteger installed = 0;
+static void qqesignRecallSideAccountShortBlocker(id self, SEL _cmd, id data, unsigned long long uin, BOOL flag) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截短链路撤回: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return;
+    }
 
-    const char *targetClasses[] = {
-        "QQMessageRecallNetEngine",
-        "QQMessageRecallModule",
-        "QQMessageRecallPackageHandler",
-        "NTAIOChatRecallService",
-        "NTAIOMenuRecallService",
-        "CanRecallHandler",
-        "NTAIOGrayTipsOtherLinkRecallHandle",
+    QQEOrigVoidSideAccountShort orig = (QQEOrigVoidSideAccountShort)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, data, uin, flag);
+}
+
+static id qqesignRecallModuleFullBlocker(id self,
+                                         SEL _cmd,
+                                         const void *data,
+                                         int bufferLen,
+                                         int subcmd,
+                                         unsigned long long uin,
+                                         BOOL *tracelessFlag) {
+    if (pref_antiRevoke && tracelessFlag) *tracelessFlag = NO;
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截主撤回模块: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return nil;
+    }
+
+    QQEOrigIdRecallModuleFull orig = (QQEOrigIdRecallModuleFull)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, data, bufferLen, subcmd, uin, tracelessFlag) : nil;
+}
+
+static BOOL qqesignRecallNetEngineBlocker(id self,
+                                          SEL _cmd,
+                                          const void *data,
+                                          int bufferLen,
+                                          int subcmd,
+                                          void *model) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截网络层撤回解析: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return NO;
+    }
+
+    QQEOrigBoolRecallNetParse orig = (QQEOrigBoolRecallNetParse)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, data, bufferLen, subcmd, model) : NO;
+}
+
+static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
+    NSUInteger installed = 0;
+    static const QQESignRecallMethodSpec specs[] = {
+        { "QQMessageRecallNetEngine", "parseC2CRecallNotify:bufferLen:subcmd:model:", "B40@0:8r^v16i24i28^{RecallModel=}32", (IMP)qqesignRecallNetEngineBlocker, "net-parse" },
+        { "QQMessageRecallModule", "handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:", "@48@0:8r^v16i24i28Q32^B40", (IMP)qqesignRecallModuleFullBlocker, "module-full" },
+        { "QSideAccountAssistantService", "handleSideAccountRecallNotify:bindUin:tracelessFlag:", "v36@0:8@16Q24B32", (IMP)qqesignRecallSideAccountShortBlocker, "module-short" },
+        { "_TtC15AIOPhotoBrowser31NTAIOPhotoBrowserViewController", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "photo-browser-receive" },
+        { "_TtC9NTAIOChat21NTStreamMsgAIOHandler", "receiveRecallNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "stream-receive" },
+        { "_TtC9NTAIOChat20NTAIOFloatEarManager", "onRecvRecallMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear" },
+        { "NTFAViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-view" },
+        { "QQChatFilesViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "chat-files" },
+        { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-browser" },
+        { "MQZoneUploadPhotoViewController", "msgRecallMsgNoti:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "mqzone-upload" },
+        { "QQTinyVideoImageView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "tiny-video" },
+        { "FAVideoPlayerView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-video" },
+        { "QQFloatingViewManager", "msgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "floating-view" },
+        { "NTGuildMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-listener" },
+        { "_TtC13GuildNTKernel20SWIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-swift-listener" },
+        { "GProSDKListener", "onPushRevokeGuild:operatorTinyId:memberTinyId:memberType:guildInfo:channelMap:uncategorizedChannels:categoryList:sourceType:", "v80@0:8q16q24q32i40@44@52@60@68i76", (IMP)qqesignRecallGuildPushBlocker, "guild-push" },
+        { "NTAIOGrayTipsOtherLinkRecallHandle", "grayTipsEventWithModel:curVC:contact:busiId:", "v44@0:8@16@24@32I40", (IMP)qqesignRecallGrayTipBlocker, "gray-tip" },
     };
 
-    const NSUInteger targetClassCount = sizeof(targetClasses) / sizeof(targetClasses[0]);
-    for (NSUInteger i = 0; i < targetClassCount; i++) {
-        Class cls = objc_getClass(targetClasses[i]);
+    for (NSUInteger i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+        Class cls = objc_getClass(specs[i].className);
         if (!cls) continue;
 
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "parseC2CRecallNotify:bufferLen:subcmd:model:", (IMP)qqesignRecallNetEngineBlocker, "net");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:", (IMP)qqesignRecallModuleFullBlocker, "module-full");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "handleSideAccountRecallNotify:bindUin:tracelessFlag:", (IMP)qqesignRecallModuleShortBlocker, "module-short");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "receiveRecallNotification:", (IMP)qqesignRecallOneObjectBlocker, "receive");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "receiveRecallNotificationAt:", (IMP)qqesignRecallOneObjectBlocker, "receive-at");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "handleRecallMsg:", (IMP)qqesignRecallOneObjectBlocker, "handle-msg");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "TryHandleAllQQRecallNotify", (IMP)qqesignRecallNoArgBlocker, "try-all");
+        installed += qqesignSwizzleRecallMethodOnClass(cls,
+                                                       specs[i].selName,
+                                                       specs[i].typeEncoding,
+                                                       specs[i].newImp,
+                                                       specs[i].tag);
     }
 
-    Class grayTipCls = objc_getClass("NTAIOGrayTipsOtherLinkRecallHandle");
-    if (grayTipCls) {
-        installed += qqesignSwizzleRecallMethodOnClass(grayTipCls,
-                                                       "grayTipsEventWithModel:curVC:contact:busiId:",
-                                                       (IMP)qqesignRecallGrayTipBlocker,
-                                                       "gray-tip");
+    if (installed > 0) {
+        NSLog(@"[QQESign] %s 本轮新增防撤回 Hook: %lu", (reason ? reason : "anti-recall"), (unsigned long)installed);
     }
-
-    unsigned int classCount = 0;
-    Class *classes = objc_copyClassList(&classCount);
-    if (!classes) return installed;
-
-    for (unsigned int i = 0; i < classCount; i++) {
-        Class cls = classes[i];
-        const char *name = class_getName(cls);
-        if (!name) continue;
-        if (!strstr(name, "Recall") && !strstr(name, "Revoke")) continue;
-
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "receiveRecallNotification:", (IMP)qqesignRecallOneObjectBlocker, "scan-receive");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "receiveRecallNotificationAt:", (IMP)qqesignRecallOneObjectBlocker, "scan-receive-at");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "handleRecallMsg:", (IMP)qqesignRecallOneObjectBlocker, "scan-handle-msg");
-        installed += qqesignSwizzleRecallMethodOnClass(cls, "TryHandleAllQQRecallNotify", (IMP)qqesignRecallNoArgBlocker, "scan-try-all");
-    }
-
-    free(classes);
     return installed;
+}
+
+static void qqesignRecallImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide) {
+    (void)mh;
+    (void)vmaddr_slide;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        qqesignInstallRecallHooksPass("dyld-add-image");
+    });
 }
 
 static void qqesignInstallRecallHooksWithRetry(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSArray<NSNumber *> *delays = @[@0.0, @0.8, @2.0, @5.0, @10.0];
+        qqesignInstallRecallHooksPass("ctor");
+        __dyld_register_func_for_add_image(qqesignRecallImageAdded);
+
+        NSArray<NSNumber *> *delays = @[@0.8, @2.0, @5.0, @10.0, @20.0, @40.0];
         for (NSNumber *delay in delays) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                NSUInteger installed = qqesignInstallRecallHooksPass();
-                if (installed > 0) {
-                    NSLog(@"[QQESign] 本轮新增防撤回 Hook: %lu", (unsigned long)installed);
-                }
+                qqesignInstallRecallHooksPass("retry");
             });
         }
     });
 }
-
-// ─────────────────────────────────────────────
-#pragma mark - 1. 防撤回 — 模块层拦截 (NT架构)
-// ─────────────────────────────────────────────
-// NT QQ 撤回真实链路（ObjC classlist 验证）：
-//   网络层解析 → QQMessageRecallNetEngine     (parseC2CRecallNotify:...)
-//   模块处理层 → QQMessageRecallModule        (handleSideAccountRecallNotify:...)
-//   灰条展示层 → NTAIOGrayTipsOtherLinkRecallHandle (grayTipsEventWithModel:...)
-//
-// NSNotification 方案已验证无效（NT 架构 UI 通过 KVO/数据绑定更新）。
-// 改为在 ObjC 模块层直接拦截，多层叠加保证覆盖各种聊天场景。
-
-// 层1: 网络解析层 — C2C 撤回协议包解析入口（最早截断点）
-%hook QQMessageRecallNetEngine
-
-- (void)parseC2CRecallNotify:(id)data bufferLen:(NSUInteger)len subcmd:(int)subcmd model:(id)model {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 C2C 撤回解析");
-        return;
-    }
-    %orig;
-}
-
-%end
-
-// 层2: 模块处理层 — 账号撤回通知处理（C2C + 群均经过此处）
-%hook QQMessageRecallModule
-
-- (void)handleSideAccountRecallNotify:(id)data bufferLen:(NSUInteger)len subcmd:(int)subcmd bindUin:(unsigned long long)uin tracelessFlag:(int)flag {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQMessageRecallModule handleSideAccountRecallNotify");
-        return;
-    }
-    %orig;
-}
-
-%end
-
-// 层3: UI 灰条层 — 拦截"xxx 撤回了一条消息"灰色提示渲染
-%hook NTAIOGrayTipsOtherLinkRecallHandle
-
-- (void)grayTipsEventWithModel:(id)model curVC:(id)vc contact:(id)contact busiId:(id)busiId {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截撤回灰条渲染");
-        return;
-    }
-    %orig;
-}
-
-%end
-
-// ─────────────────────────────────────────────
 #pragma mark - 2. 闪照 — ObjC层 (OCPicElement / QQBasePhoto)
 // ─────────────────────────────────────────────
 // 两个类均经过 ObjC classlist 解析确认，isFlashPic / setIsFlashPic: 均存在于方法表中。
