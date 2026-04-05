@@ -319,9 +319,10 @@ static void hookRevokeClasses(void) {
     SEL allocSel = @selector(alloc);
 
     for (int i = 0; i < 3; i++) {
-        Class cls = objc_getClass(classNames[i]);
+        const char *className = classNames[i];
+        Class cls = objc_getClass(className);
         if (!cls) {
-            NSLog(@"[QQESign] 未找到类: %s", classNames[i]);
+            NSLog(@"[QQESign] 未找到类: %s", className);
             continue;
         }
 
@@ -333,17 +334,16 @@ static void hookRevokeClasses(void) {
         __block IMP origIMP = method_getImplementation(m);
 
         // 创建新的 block-based IMP
-        int index = i;
         IMP newIMP = imp_implementationWithBlock(^id(id self_) {
             if (pref_antiRevoke) {
-                NSLog(@"[QQESign] 拦截撤回类 alloc: %s", classNames[index]);
+                NSLog(@"[QQESign] 拦截撤回类 alloc: %s", className);
                 return nil;
             }
             return ((id(*)(id, SEL))origIMP)(self_, allocSel);
         });
 
         class_replaceMethod(meta, allocSel, newIMP, method_getTypeEncoding(m));
-        NSLog(@"[QQESign] Hooked +alloc on %s", classNames[i]);
+        NSLog(@"[QQESign] Hooked +alloc on %s", className);
     }
 }
 
