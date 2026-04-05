@@ -275,74 +275,51 @@ static void addESignButton(UIViewController *vc, SEL action) {
 }
 
 // ─────────────────────────────────────────────
-#pragma mark - 1. 防撤回 — NT架构 ObjC hook 点
+#pragma mark - 1. 防撤回 — 通知中心层拦截
 // ─────────────────────────────────────────────
-// 验证存在于 ObjC classlist 中的类（__DATA_CONST,__objc_classlist 解析确认）
+// NT QQ 的撤回流程：
+//   NT kernel → NSNotification → 各 UI 组件更新
+//
+// 在 NSNotificationCenter 的 post 环节直接拦截，
+// 比 hook 具体 VC 更可靠（覆盖所有聊天场景）。
+//
+// 已验证的撤回通知名（从 QQ 二进制 strings 中提取）：
+//   __QQReceiveRecallMsgNotification__           — 普通 C2C/群 撤回
+//   __QQGProReceiveRecallMsgNotifications__      — 频道 撤回
+//   __QQReceiveRecallForVideoStopNotification__  — 视频停止
+//   __QQReceiveRecallFormFileNotification__      — 文件撤回
 
-// NT主聊天窗VC 的撤回通知处理
-%hook NTFAViewController
+static BOOL isRecallNotification(NSString *name) {
+    if (!name) return NO;
+    return ([name isEqualToString:@"__QQReceiveRecallMsgNotification__"] ||
+            [name isEqualToString:@"__QQGProReceiveRecallMsgNotifications__"] ||
+            [name isEqualToString:@"__QQReceiveRecallForVideoStopNotification__"] ||
+            [name isEqualToString:@"__QQReceiveRecallFormFileNotification__"]);
+}
 
-- (void)msgRecallMsgNoti:(id)noti {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 NTFAViewController msgRecallMsgNoti:");
+%hook NSNotificationCenter
+
+- (void)postNotificationName:(NSString *)name object:(id)object {
+    if (pref_antiRevoke && isRecallNotification(name)) {
+        NSLog(@"[QQESign] 拦截撤回通知: %@", name);
         return;
     }
     %orig;
 }
 
-%end
-
-// 图片浏览器 的撤回通知处理
-%hook QQRichMediaChatImagePhotoBrowserViewController
-
-- (void)msgRecallMsgNoti:(id)noti {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQRichMediaChatImagePhotoBrowserViewController msgRecallMsgNoti:");
+- (void)postNotificationName:(NSString *)name object:(id)object userInfo:(NSDictionary *)userInfo {
+    if (pref_antiRevoke && isRecallNotification(name)) {
+        NSLog(@"[QQESign] 拦截撤回通知: %@", name);
         return;
     }
     %orig;
 }
 
-%end
-
-// 聊天文件VC 的撤回通知处理
-%hook QQChatFilesViewController
-
-- (void)msgRecallMsgNoti:(id)noti {
-    if (pref_antiRevoke) {
-        NSLog(@"[QQESign] 拦截 QQChatFilesViewController msgRecallMsgNoti:");
+- (void)postNotification:(NSNotification *)notification {
+    if (pref_antiRevoke && isRecallNotification(notification.name)) {
+        NSLog(@"[QQESign] 拦截撤回通知: %@", notification.name);
         return;
     }
-    %orig;
-}
-
-%end
-
-// 小视频缩略图 的撤回处理
-%hook QQTinyVideoImageView
-
-- (void)onMsgRecall:(id)info {
-    if (pref_antiRevoke) return;
-    %orig;
-}
-
-%end
-
-// 视频播放器 的撤回处理
-%hook FAVideoPlayerView
-
-- (void)onMsgRecall:(id)info {
-    if (pref_antiRevoke) return;
-    %orig;
-}
-
-%end
-
-// 浮动视图管理器 的撤回处理
-%hook QQFloatingViewManager
-
-- (void)msgRecall:(id)info {
-    if (pref_antiRevoke) return;
     %orig;
 }
 
