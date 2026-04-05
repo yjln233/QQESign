@@ -285,16 +285,20 @@ typedef struct {
     IMP orig;
 } QQESignRecallHookRecord;
 
-static QQESignRecallHookRecord gQQESignRecallHooks[64];
+static QQESignRecallHookRecord gQQESignRecallHooks[256];
 static NSUInteger gQQESignRecallHookCount = 0;
 
 typedef void (*QQEOrigVoidOneObj)(id, SEL, id);
+typedef void (*QQEOrigVoidZeroArg)(id, SEL);
 typedef void (*QQEOrigVoidMsgRecall3)(id, SEL, int, id, unsigned long long);
 typedef void (*QQEOrigVoidGuildPush)(id, SEL, long long, long long, long long, int, id, id, id, id, int);
 typedef void (*QQEOrigVoidGrayTip)(id, SEL, id, id, id, unsigned int);
 typedef void (*QQEOrigVoidSideAccountShort)(id, SEL, id, unsigned long long, BOOL);
 typedef id   (*QQEOrigIdRecallModuleFull)(id, SEL, const void *, int, int, unsigned long long, BOOL *);
+typedef id   (*QQEOrigIdRecallConvert4)(id, SEL, const void *, const void *, int, unsigned long long);
 typedef BOOL (*QQEOrigBoolRecallNetParse)(id, SEL, const void *, int, int, void *);
+typedef BOOL (*QQEOrigBoolOneObj)(id, SEL, id);
+typedef BOOL (*QQEOrigBoolTwoObj)(id, SEL, id, id);
 
 typedef struct {
     const char *className;
@@ -383,6 +387,72 @@ static BOOL qqesignSwizzleRecallMethodOnClass(Class cls,
           class_getName(cls),
           selName);
     return YES;
+}
+
+static BOOL qqesignClassNameContains(const char *clsName, const char *needle) {
+    return (clsName && needle && strstr(clsName, needle) != NULL);
+}
+
+static BOOL qqesignMayBeRecallRelatedClass(const char *clsName, const char *selName) {
+    if (!clsName || !selName) return NO;
+
+    if (qqesignClassNameContains(clsName, "Recall") ||
+        qqesignClassNameContains(clsName, "Revoke") ||
+        qqesignClassNameContains(clsName, "QQMessage") ||
+        qqesignClassNameContains(clsName, "DecouplingBridge") ||
+        qqesignClassNameContains(clsName, "MsgListener") ||
+        qqesignClassNameContains(clsName, "PushManager") ||
+        qqesignClassNameContains(clsName, "SideAccount") ||
+        qqesignClassNameContains(clsName, "AIO") ||
+        qqesignClassNameContains(clsName, "Chat") ||
+        qqesignClassNameContains(clsName, "Photo") ||
+        qqesignClassNameContains(clsName, "Browser") ||
+        qqesignClassNameContains(clsName, "File") ||
+        qqesignClassNameContains(clsName, "Upload") ||
+        qqesignClassNameContains(clsName, "Video") ||
+        qqesignClassNameContains(clsName, "FloatEar") ||
+        qqesignClassNameContains(clsName, "Floating") ||
+        qqesignClassNameContains(clsName, "RichMedia") ||
+        qqesignClassNameContains(clsName, "GPro")) {
+        return YES;
+    }
+
+    if (!strcmp(selName, "recallMessagePair:") && qqesignClassNameContains(clsName, "Bridge")) return YES;
+    if (!strcmp(selName, "msgRecallMsgNotication:") && qqesignClassNameContains(clsName, "PushManager")) return YES;
+    if (!strcmp(selName, "findRecallModelAndRemove:") && qqesignClassNameContains(clsName, "Handler")) return YES;
+    if (!strcmp(selName, "updateCellViewRecall") && qqesignClassNameContains(clsName, "AIOCell")) return YES;
+    return NO;
+}
+
+static NSUInteger qqesignInstallRecallHooksBySelector(const char *selName,
+                                                      const char *typeEncoding,
+                                                      IMP newImp,
+                                                      const char *tag) {
+    if (!selName || !newImp) return 0;
+
+    int classCount = objc_getClassList(NULL, 0);
+    if (classCount <= 0) return 0;
+
+    Class *classes = (Class *)malloc(sizeof(Class) * (NSUInteger)classCount);
+    if (!classes) return 0;
+
+    classCount = objc_getClassList(classes, classCount);
+    NSUInteger installed = 0;
+
+    for (int i = 0; i < classCount; i++) {
+        Class cls = classes[i];
+        const char *clsName = class_getName(cls);
+        if (!qqesignMayBeRecallRelatedClass(clsName, selName)) continue;
+
+        installed += qqesignSwizzleRecallMethodOnClass(cls,
+                                                       selName,
+                                                       typeEncoding,
+                                                       newImp,
+                                                       tag);
+    }
+
+    free(classes);
+    return installed;
 }
 
 static void qqesignRecallOneObjectBlocker(id self, SEL _cmd, id arg1) {
@@ -477,6 +547,51 @@ static BOOL qqesignRecallNetEngineBlocker(id self,
     return orig ? orig(self, _cmd, data, bufferLen, subcmd, model) : NO;
 }
 
+static BOOL qqesignRecallBoolOneObjectBlocker(id self, SEL _cmd, id arg1) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回布尔入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return NO;
+    }
+
+    QQEOrigBoolOneObj orig = (QQEOrigBoolOneObj)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, arg1) : NO;
+}
+
+static BOOL qqesignRecallBoolTwoObjectBlocker(id self, SEL _cmd, id arg1, id arg2) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回布尔入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return NO;
+    }
+
+    QQEOrigBoolTwoObj orig = (QQEOrigBoolTwoObj)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, arg1, arg2) : NO;
+}
+
+static void qqesignRecallZeroArgBlocker(id self, SEL _cmd) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回零参入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return;
+    }
+
+    QQEOrigVoidZeroArg orig = (QQEOrigVoidZeroArg)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd);
+}
+
+static id qqesignRecallConvertBlocker(id self,
+                                      SEL _cmd,
+                                      const void *recallItem,
+                                      const void *recallModel,
+                                      int msgType,
+                                      unsigned long long bindUin) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回消息转换: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return nil;
+    }
+
+    QQEOrigIdRecallConvert4 orig = (QQEOrigIdRecallConvert4)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, recallItem, recallModel, msgType, bindUin) : nil;
+}
+
 static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
     NSUInteger installed = 0;
     static const QQESignRecallMethodSpec specs[] = {
@@ -493,8 +608,23 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
         { "QQTinyVideoImageView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "tiny-video" },
         { "FAVideoPlayerView", "onMsgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "fa-video" },
         { "QQFloatingViewManager", "msgRecall:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "floating-view" },
+        { "QQMessageDecouplingBridge", "recallMessagePair:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "decoupling-bridge" },
+        { "QQMessageRecallModule", "convertRecallItemToMsg:recallModel:msgType:bindUin:", "@44@0:8^v16^v24i32Q36", (IMP)qqesignRecallConvertBlocker, "module-convert" },
+        { "QQGProMsgPushManager", "msgRecallMsgNotication:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "gpro-push" },
+        { "QQChatFilesRichMediaHandler", "findRecallModelAndRemove:", "B24@0:8@16", (IMP)qqesignRecallBoolOneObjectBlocker, "chat-files-richmedia" },
+        { "QQRichMediaChatImagePhotoBrowserViewController", "msgRecallMsgNotiForGProMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "richmedia-gpro" },
+        { "QQChatFilesViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "chat-files-alert" },
+        { "QQRichMediaChatImagePhotoBrowserViewController", "showRecallAlert", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "richmedia-alert" },
+        { "QQAIOCell", "updateCellViewRecall", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "aio-cell-recall" },
+        { "QQAIOFloatingVideoView", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "aio-floating-video" },
+        { "QQWSFloatingVideoViewManager", "floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "ws-floating-video" },
+        { "_TtC9NTAIOChat17NTAIOFloatEarPart", "recallMessageWithNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "float-ear-part" },
         { "NTGuildMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-listener" },
         { "_TtC13GuildNTKernel20SWIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "guild-swift-listener" },
+        { "KTIKernelMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "kti-listener" },
+        { "NTGameTempAioMsgListener", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "game-temp-listener" },
+        { "ThirdAppUploadPicService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "third-upload-pic" },
+        { "ZTPSquareAIOMessageService", "onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "ztp-square" },
         { "GProSDKListener", "onPushRevokeGuild:operatorTinyId:memberTinyId:memberType:guildInfo:channelMap:uncategorizedChannels:categoryList:sourceType:", "v80@0:8q16q24q32i40@44@52@60@68i76", (IMP)qqesignRecallGuildPushBlocker, "guild-push" },
         { "NTAIOGrayTipsOtherLinkRecallHandle", "grayTipsEventWithModel:curVC:contact:busiId:", "v44@0:8@16@24@32I40", (IMP)qqesignRecallGrayTipBlocker, "gray-tip" },
     };
@@ -509,6 +639,15 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
                                                        specs[i].newImp,
                                                        specs[i].tag);
     }
+
+    installed += qqesignInstallRecallHooksBySelector("recallMessagePair:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-recall-pair");
+    installed += qqesignInstallRecallHooksBySelector("msgRecallMsgNotication:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-gpro-push");
+    installed += qqesignInstallRecallHooksBySelector("findRecallModelAndRemove:", "B24@0:8@16", (IMP)qqesignRecallBoolOneObjectBlocker, "scan-find-recall-model");
+    installed += qqesignInstallRecallHooksBySelector("msgRecallMsgNotiForGProMsg:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-richmedia-gpro");
+    installed += qqesignInstallRecallHooksBySelector("recallMessageWithNotification:", "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "scan-float-ear");
+    installed += qqesignInstallRecallHooksBySelector("floatingVideoView:msgRecall:", "B32@0:8@16@24", (IMP)qqesignRecallBoolTwoObjectBlocker, "scan-floating-video");
+    installed += qqesignInstallRecallHooksBySelector("updateCellViewRecall", "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "scan-aio-cell-recall");
+    installed += qqesignInstallRecallHooksBySelector("onMsgRecall:peerUid:seq:", "v36@0:8i16@20Q28", (IMP)qqesignRecallMsgRecall3Blocker, "scan-kernel-listener");
 
     if (installed > 0) {
         NSLog(@"[QQESign] %s 本轮新增防撤回 Hook: %lu", (reason ? reason : "anti-recall"), (unsigned long)installed);
