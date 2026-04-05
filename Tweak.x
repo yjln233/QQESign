@@ -528,7 +528,7 @@ static void qqesignInstallRecallHooksWithRetry(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         qqesignInstallRecallHooksPass("ctor");
-        __dyld_register_func_for_add_image(qqesignRecallImageAdded);
+        _dyld_register_func_for_add_image(qqesignRecallImageAdded);
 
         NSArray<NSNumber *> *delays = @[@0.8, @2.0, @5.0, @10.0, @20.0, @40.0];
         for (NSNumber *delay in delays) {
