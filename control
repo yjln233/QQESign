@@ -1,8 +1,0 @@
-Package: com.qqesign.tweak
-Name: QQESign
-Version: 1.0.0
-Architecture: iphoneos-arm64e
-Description: QQ 免越狱注入 — 防撤回 / 闪照保存 / 自定义设备信息 (arm64e sideload)
-Maintainer: QQESign
-Author: QQESign
-Section: Tweaks

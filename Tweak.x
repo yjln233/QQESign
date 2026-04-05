@@ -66,19 +66,6 @@ static void loadPrefs(void) {
     if (name.length > 0) pref_deviceName = name;
 }
 
-static void savePrefs(void) {
-    NSUserDefaults *ud = tweakDefaults();
-    [ud setBool:pref_antiRevoke     forKey:@"antiRevoke"];
-    [ud setBool:pref_flashSave      forKey:@"flashSave"];
-    [ud setBool:pref_flashUnlimited forKey:@"flashUnlimited"];
-    [ud setBool:pref_fakeDevice     forKey:@"fakeDevice"];
-    [ud setObject:pref_deviceName   forKey:@"deviceName"];
-    [ud setBool:pref_fakeBattery    forKey:@"fakeBattery"];
-    [ud setFloat:pref_batteryLevel  forKey:@"batteryLevel"];
-    [ud setBool:pref_isCharging     forKey:@"isCharging"];
-    [ud synchronize];
-}
-
 // ─────────────────────────────────────────────
 #pragma mark - Helpers
 // ─────────────────────────────────────────────
