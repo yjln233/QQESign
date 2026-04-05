@@ -5,10 +5,11 @@ LOGOS_DEFAULT_GENERATOR = internal
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = QQESign
+LIBRARY_NAME = QQESign
 
 QQESign_FILES = Tweak.x
 QQESign_CFLAGS = -fobjc-arc -DQQESIGN_SIDELOAD=1
 QQESign_FRAMEWORKS = UIKit Foundation CoreGraphics Photos
+QQESign_LDFLAGS = -install_name @rpath/QQESign.dylib
 
-include $(THEOS)/makefiles/tweak.mk
+include $(THEOS)/makefiles/library.mk

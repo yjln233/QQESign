@@ -48,13 +48,14 @@ jobs:
           echo "Building with SDK: $SDK TARGET: $TARGET"
           make clean
           make STRIP=1
-          find .theos/obj -name "QQESign.dylib"
+          find .theos/obj -name "QQESign.dylib" -o -name "libQQESign.dylib" | head -5
 
       - name: Collect artifacts
         run: |
           set -e
           mkdir -p dist
-          find .theos/obj -name "QQESign.dylib" -exec cp {} dist/ \;
+          # library.mk may output as QQESign.dylib or libQQESign.dylib
+          find .theos/obj \( -name "QQESign.dylib" -o -name "libQQESign.dylib" \) -exec cp {} dist/QQESign.dylib \;
           test -f dist/QQESign.dylib
           ls -la dist/
 
