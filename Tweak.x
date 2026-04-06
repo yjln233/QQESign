@@ -397,7 +397,6 @@ typedef struct {
 } QQESignRecallMethodSpec;
 
 typedef int (*QQEDobbyHookFn)(void *target, void *replace, void **origin);
-typedef void (*QQEMSHookFunctionFn)(void *target, void *replace, void **origin);
 
 typedef struct {
     const uint8_t *textBytes;
@@ -414,7 +413,6 @@ typedef uintptr_t (*QQEKernelRecallEntryFn)(void *x0, const void *x1, const void
 typedef uintptr_t (*QQEMsgRecallMgrEntryFn)(void *x0, void *x1, void *x2, void *x3, void *x4, void *x5, void *x6, void *x7);
 
 static QQEDobbyHookFn gQQEDobbyHook = NULL;
-static QQEMSHookFunctionFn gQQEMSHookFunction = NULL;
 
 static QQEKernelRecallEntryFn gQQEOrigKernelRecallMsgFromC2CAndGroup = NULL;
 static QQEKernelRecallEntryFn gQQEOrigKernelGetRecallMsgsByMsgId = NULL;
@@ -441,28 +439,20 @@ static size_t qqesignBoundedCStringLength(const char *s, size_t maxLen) {
 }
 
 static BOOL qqesignResolveInlineHookBackend(void) {
-    if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+    if (gQQEDobbyHook) return YES;
 
     gQQEDobbyHook = (QQEDobbyHookFn)dlsym(RTLD_DEFAULT, "DobbyHook");
-    gQQEMSHookFunction = (QQEMSHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+    if (gQQEDobbyHook) return YES;
 
     static const char *const dylibs[] = {
         "/usr/lib/libdobby.dylib",
-        "/usr/lib/libsubstrate.dylib",
-        "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
-        "/usr/lib/libhooker.dylib",
+        "/usr/lib/libDobby.dylib",
     };
     for (NSUInteger i = 0; i < sizeof(dylibs) / sizeof(dylibs[0]); i++) {
         void *h = dlopen(dylibs[i], RTLD_NOW);
         if (!h) continue;
-        if (!gQQEDobbyHook) {
-            gQQEDobbyHook = (QQEDobbyHookFn)dlsym(h, "DobbyHook");
-        }
-        if (!gQQEMSHookFunction) {
-            gQQEMSHookFunction = (QQEMSHookFunctionFn)dlsym(h, "MSHookFunction");
-        }
-        if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+        gQQEDobbyHook = (QQEDobbyHookFn)dlsym(h, "DobbyHook");
+        if (gQQEDobbyHook) return YES;
     }
     return NO;
 }
@@ -470,7 +460,7 @@ static BOOL qqesignResolveInlineHookBackend(void) {
 static BOOL qqesignInstallInlineHook(void *target, void *replacement, void **origin, const char *tag) {
     if (!target || !replacement) return NO;
     if (!qqesignResolveInlineHookBackend()) {
-        NSLog(@"[QQESign] inline hook 后端未就绪(%s): 需要 DobbyHook 或 MSHookFunction", (tag ? tag : "unknown"));
+        NSLog(@"[QQESign] inline hook 后端未就绪(%s): 需要 DobbyHook", (tag ? tag : "unknown"));
         return NO;
     }
 
@@ -481,12 +471,6 @@ static BOOL qqesignInstallInlineHook(void *target, void *replacement, void **ori
             return YES;
         }
         NSLog(@"[QQESign] inline hook 安装失败(Dobby rc=%d): %s target=%p", rc, (tag ? tag : "unknown"), target);
-    }
-
-    if (gQQEMSHookFunction) {
-        gQQEMSHookFunction(target, replacement, origin);
-        NSLog(@"[QQESign] inline hook 安装完成(MSHookFunction): %s target=%p", (tag ? tag : "unknown"), target);
-        return YES;
     }
 
     NSLog(@"[QQESign] inline hook 安装失败: %s target=%p", (tag ? tag : "unknown"), target);
@@ -686,7 +670,7 @@ static NSUInteger qqesignInstallKernelInlineHooksPass(const char *reason) {
     BOOL attempted = NO;
 
     if (!qqesignResolveInlineHookBackend()) {
-        NSLog(@"[QQESign] %s inline-C++ hook 未启用: 未找到 DobbyHook/MSHookFunction",
+        NSLog(@"[QQESign] %s inline-C++ hook 未启用: 未找到 DobbyHook",
               (reason ? reason : "anti-recall"));
         return 0;
     }
