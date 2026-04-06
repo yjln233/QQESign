@@ -310,9 +310,14 @@ static NSUInteger gQQESignRecallHookCount = 0;
 typedef BOOL (*QQEOrigBoolRecallNetParse)(id, SEL, const void *, int, int, void *);
 typedef id   (*QQEOrigIdRecallModuleFull)(id, SEL, const void *, int, int, unsigned long long, BOOL *);
 typedef id   (*QQEOrigIdRecallConvert)(id, SEL, const void *, void *, int, unsigned long long);
+typedef id   (*QQEOrigIdIntBool)(id, SEL, int, BOOL);
 typedef void (*QQEOrigVoidOneObj)(id, SEL, id);
+typedef void (*QQEOrigVoidTwoObj)(id, SEL, id, id);
+typedef void (*QQEOrigVoidThreeObj)(id, SEL, id, id, id);
 typedef void (*QQEOrigVoidZeroArg)(id, SEL);
+typedef BOOL (*QQEOrigBoolZeroArg)(id, SEL);
 typedef BOOL (*QQEOrigBoolOneObj)(id, SEL, id);
+typedef void (*QQEOrigVoidOneBool)(id, SEL, BOOL);
 typedef void (*QQEOrigVoidOneObjBool)(id, SEL, id, BOOL);
 typedef void (*QQEOrigVoidGrayTip)(id, SEL, id, id, id, unsigned int);
 typedef void (*QQEOrigVoidMsgRecall3)(id, SEL, int, id, unsigned long long);
@@ -325,6 +330,25 @@ typedef struct {
     IMP newImp;
     const char *tag;
 } QQESignRecallMethodSpec;
+
+static BOOL qqesignIsRecallNotificationName(NSString *name) {
+    if (name.length == 0) return NO;
+    static NSSet<NSString *> *exact = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        exact = [NSSet setWithArray:@[
+            @"__QQReceiveRecallMsgNotification__",
+            @"__QQReceiveRecallForVideoStopNotification__",
+            @"__QQReceiveRecallFormFileNotification__",
+            @"__QQGProReceiveRecallMsgNotifications__",
+        ]];
+    });
+    if ([exact containsObject:name]) return YES;
+    if ([name hasPrefix:@"__QQReceiveRecall"] || [name hasPrefix:@"QQReceiveRecall"] || [name hasPrefix:@"__QQGProReceiveRecall"]) return YES;
+    if ([name rangeOfString:@"Recall" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    if ([name rangeOfString:@"Revoke" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    return NO;
+}
 
 static BOOL qqesignRecallHookExists(Class cls, SEL sel) {
     for (NSUInteger i = 0; i < gQQESignRecallHookCount; i++) {
@@ -464,6 +488,15 @@ static void qqesignRecallOneObjectBlocker(id self, SEL _cmd, id arg1) {
     if (orig) orig(self, _cmd, arg1);
 }
 
+static void qqesignRecallThreeObjectBlocker(id self, SEL _cmd, id arg1, id arg2, id arg3) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 拦截撤回拉取链路: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return;
+    }
+    QQEOrigVoidThreeObj orig = (QQEOrigVoidThreeObj)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, arg1, arg2, arg3);
+}
+
 static void qqesignRecallZeroArgBlocker(id self, SEL _cmd) {
     if (pref_antiRevoke) {
         NSLog(@"[QQESign] 拦截撤回零参入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
@@ -471,6 +504,15 @@ static void qqesignRecallZeroArgBlocker(id self, SEL _cmd) {
     }
     QQEOrigVoidZeroArg orig = (QQEOrigVoidZeroArg)qqesignLookupRecallOriginal(self, _cmd);
     if (orig) orig(self, _cmd);
+}
+
+static BOOL qqesignRecallBoolZeroArgBlocker(id self, SEL _cmd) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 清空撤回标记: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return NO;
+    }
+    QQEOrigBoolZeroArg orig = (QQEOrigBoolZeroArg)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd) : NO;
 }
 
 static BOOL qqesignRecallBoolOneObjectBlocker(id self, SEL _cmd, id arg1) {
@@ -482,6 +524,15 @@ static BOOL qqesignRecallBoolOneObjectBlocker(id self, SEL _cmd, id arg1) {
     return orig ? orig(self, _cmd, arg1) : NO;
 }
 
+static void qqesignRecallBoolSetterBlocker(id self, SEL _cmd, BOOL flag) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] 阻止写入撤回标记: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return;
+    }
+    QQEOrigVoidOneBool orig = (QQEOrigVoidOneBool)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, flag);
+}
+
 static void qqesignRecallOneObjectBoolBlocker(id self, SEL _cmd, id arg1, BOOL arg2) {
     if (pref_antiRevoke) {
         NSLog(@"[QQESign] 拦截撤回入口: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
@@ -489,6 +540,15 @@ static void qqesignRecallOneObjectBoolBlocker(id self, SEL _cmd, id arg1, BOOL a
     }
     QQEOrigVoidOneObjBool orig = (QQEOrigVoidOneObjBool)qqesignLookupRecallOriginal(self, _cmd);
     if (orig) orig(self, _cmd, arg1, arg2);
+}
+
+static id qqesignRecallDecouplingPushBlocker(id self, SEL _cmd, int pushType, BOOL isRecallPush) {
+    if (pref_antiRevoke && isRecallPush) {
+        NSLog(@"[QQESign] 拦截撤回 push 标识生成: -[%@ %@]", NSStringFromClass([self class]), NSStringFromSelector(_cmd));
+        return nil;
+    }
+    QQEOrigIdIntBool orig = (QQEOrigIdIntBool)qqesignLookupRecallOriginal(self, _cmd);
+    return orig ? orig(self, _cmd, pushType, isRecallPush) : nil;
 }
 
 static void qqesignRecallGrayTipBlocker(id self,
@@ -533,6 +593,39 @@ static void qqesignRecallGuildPushBlocker(id self,
     if (orig) orig(self, _cmd, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9);
 }
 
+static void qqesignRecallNotifPostOneBlocker(id self, SEL _cmd, id notification) {
+    NSString *name = nil;
+    if ([notification respondsToSelector:@selector(name)]) {
+        name = ((NSNotification *)notification).name;
+    }
+    if (pref_antiRevoke && qqesignIsRecallNotificationName(name)) {
+        NSLog(@"[QQESign] 拦截撤回通知派发: -[%@ %@] %@", NSStringFromClass([self class]), NSStringFromSelector(_cmd), name);
+        return;
+    }
+    QQEOrigVoidOneObj orig = (QQEOrigVoidOneObj)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, notification);
+}
+
+static void qqesignRecallNotifPostTwoBlocker(id self, SEL _cmd, id name, id object) {
+    NSString *notifName = [name isKindOfClass:[NSString class]] ? (NSString *)name : nil;
+    if (pref_antiRevoke && qqesignIsRecallNotificationName(notifName)) {
+        NSLog(@"[QQESign] 拦截撤回通知派发: -[%@ %@] %@", NSStringFromClass([self class]), NSStringFromSelector(_cmd), notifName);
+        return;
+    }
+    QQEOrigVoidTwoObj orig = (QQEOrigVoidTwoObj)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, name, object);
+}
+
+static void qqesignRecallNotifPostThreeBlocker(id self, SEL _cmd, id name, id object, id userInfo) {
+    NSString *notifName = [name isKindOfClass:[NSString class]] ? (NSString *)name : nil;
+    if (pref_antiRevoke && qqesignIsRecallNotificationName(notifName)) {
+        NSLog(@"[QQESign] 拦截撤回通知派发: -[%@ %@] %@", NSStringFromClass([self class]), NSStringFromSelector(_cmd), notifName);
+        return;
+    }
+    QQEOrigVoidThreeObj orig = (QQEOrigVoidThreeObj)qqesignLookupRecallOriginal(self, _cmd);
+    if (orig) orig(self, _cmd, name, object, userInfo);
+}
+
 static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
     NSUInteger installed = 0;
 
@@ -549,12 +642,24 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
             // 特殊分支保留
             { "QQMessageRecallModule", "handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:",
               "@48@0:8r^v16i24i28Q32^B40", (IMP)qqesignRecallModuleFullBlocker, "side-account" },
+            { "QQMessageDecouplingBridge", "generatePushUniqueIdentifier:isRecallPush:",
+              "@24@0:8i16B20", (IMP)qqesignRecallDecouplingPushBlocker, "bridge-push-id" },
+            { "OCIKernelMsgService", "getRecallMsgsByMsgId:msgIds:cb:",
+              "v40@0:8@16@24@32", (IMP)qqesignRecallThreeObjectBlocker, "kernel-get-recall" },
+            { "_TtC15NTKernelAdapter14MessageService", "getRecallMsgsWithPeer:msgIds:cb:",
+              "v40@0:8@16@24@?32", (IMP)qqesignRecallThreeObjectBlocker, "swift-kernel-get-recall" },
+            { "OCMsgRecallInfo", "isRecallNotify",
+              "B16@0:8", (IMP)qqesignRecallBoolZeroArgBlocker, "msg-recall-flag" },
+            { "OCMsgRecallInfo", "isTracelessRecall",
+              "B16@0:8", (IMP)qqesignRecallBoolZeroArgBlocker, "msg-traceless-flag" },
+            { "OCMsgRecallInfo", "setIsRecallNotify:",
+              "v20@0:8B16", (IMP)qqesignRecallBoolSetterBlocker, "msg-recall-set" },
+            { "OCMsgRecallInfo", "setIsTracelessRecall:",
+              "v20@0:8B16", (IMP)qqesignRecallBoolSetterBlocker, "msg-traceless-set" },
 
             // 你现有代码里值得保留的显式补点
             { "GroupEmotionManager", "recallMessagePair:",
               "v24@0:8@16", (IMP)qqesignRecallBridgeBlocker, "group-emotion" },
-            { "NTAIOChat", "onReceiveRecallMsgNotification:",
-              "v24@0:8@16", (IMP)qqesignRecallOneObjectBlocker, "ntaiochat-category" },
             { "QQAIOCell", "updateCellViewRecall",
               "v16@0:8", (IMP)qqesignRecallZeroArgBlocker, "aio-cell-recall" },
             { "NudgeActionManager", "insertRecallGrayTips2AioIfneed:isGroup:",
@@ -599,6 +704,12 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
             // UI 灰条兜底
             { "NTAIOGrayTipsOtherLinkRecallHandle", "grayTipsEventWithModel:curVC:contact:busiId:",
               "v44@0:8@16@24@32I40", (IMP)qqesignRecallGrayTipBlocker, "gray-tip" },
+            { "NSNotificationCenter", "postNotification:",
+              "v24@0:8@16", (IMP)qqesignRecallNotifPostOneBlocker, "notif-post-1" },
+            { "NSNotificationCenter", "postNotificationName:object:",
+              "v32@0:8@16@24", (IMP)qqesignRecallNotifPostTwoBlocker, "notif-post-2" },
+            { "NSNotificationCenter", "postNotificationName:object:userInfo:",
+              "v40@0:8@16@24@32", (IMP)qqesignRecallNotifPostThreeBlocker, "notif-post-3" },
         };
 
         for (NSUInteger i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
