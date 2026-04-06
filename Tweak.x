@@ -28,9 +28,13 @@
 #import <Foundation/Foundation.h>
 #import <Photos/Photos.h>
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 // ─────────────────────────────────────────────
 #pragma mark - Preferences (sandbox-safe)
@@ -78,6 +82,67 @@ static void loadPrefs(void) {
     NSString *name = [ud stringForKey:@"deviceName"];
     if (name.length > 0) pref_deviceName = name;
 }
+
+static NSString *qqesignRuntimeLogPath(void) {
+    static NSString *path = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *base = dirs.firstObject ?: NSTemporaryDirectory();
+        path = [base stringByAppendingPathComponent:@"qqesign_runtime.log"];
+    });
+    return path;
+}
+
+static void qqesignAppendLogLine(NSString *line) {
+    if (line.length == 0) return;
+    static dispatch_queue_t logQueue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        logQueue = dispatch_queue_create("com.qqesign.runtime.log", DISPATCH_QUEUE_SERIAL);
+    });
+
+    dispatch_async(logQueue, ^{
+        NSString *path = qqesignRuntimeLogPath();
+        if (path.length == 0) return;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [fm createFileAtPath:path contents:nil attributes:nil];
+        }
+        NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+        if (!data) return;
+
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [data writeToFile:path atomically:YES];
+            return;
+        }
+        @try {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+        } @catch (__unused NSException *e) {
+        } @finally {
+            [fh closeFile];
+        }
+    });
+}
+
+static void qqesignLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void qqesignLog(NSString *format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    if (msg.length == 0) return;
+
+    NSString *line = [NSString stringWithFormat:@"[%@] %@", [NSDate date], msg];
+    NSLog(@"%@", line);
+    qqesignAppendLogLine(line);
+}
+
+#define QQELog(...) qqesignLog(__VA_ARGS__)
+#define NSLog(...) qqesignLog(__VA_ARGS__)
 
 // ─────────────────────────────────────────────
 #pragma mark - Helpers
@@ -330,6 +395,361 @@ typedef struct {
     IMP newImp;
     const char *tag;
 } QQESignRecallMethodSpec;
+
+typedef int (*QQEDobbyHookFn)(void *target, void *replace, void **origin);
+typedef void (*QQEMSHookFunctionFn)(void *target, void *replace, void **origin);
+
+typedef struct {
+    const uint8_t *textBytes;
+    size_t textSize;
+    uintptr_t textAddr;
+    const char *cstringBytes;
+    size_t cstringSize;
+    uintptr_t cstringAddr;
+    intptr_t slide;
+    const char *imageName;
+} QQESignQQImageInfo;
+
+typedef uintptr_t (*QQEKernelRecallEntryFn)(void *x0, const void *x1, const void *x2, const void *x3);
+typedef uintptr_t (*QQEMsgRecallMgrEntryFn)(void *x0, void *x1, void *x2, void *x3, void *x4, void *x5, void *x6, void *x7);
+
+static QQEDobbyHookFn gQQEDobbyHook = NULL;
+static QQEMSHookFunctionFn gQQEMSHookFunction = NULL;
+
+static QQEKernelRecallEntryFn gQQEOrigKernelRecallMsgFromC2CAndGroup = NULL;
+static QQEKernelRecallEntryFn gQQEOrigKernelGetRecallMsgsByMsgId = NULL;
+static QQEMsgRecallMgrEntryFn gQQEOrigMsgRecallMgrRecallMsg = NULL;
+
+static uintptr_t gQQEHookAddrKernelRecallMsgFromC2CAndGroup = 0;
+static uintptr_t gQQEHookAddrKernelGetRecallMsgsByMsgId = 0;
+static uintptr_t gQQEHookAddrMsgRecallMgrRecallMsg = 0;
+static BOOL gQQEInlineHookFinalized = NO;
+
+static BOOL qqesignHasSuffix(const char *full, const char *suffix) {
+    if (!full || !suffix) return NO;
+    size_t fullLen = strlen(full);
+    size_t suffixLen = strlen(suffix);
+    if (fullLen < suffixLen) return NO;
+    return (strncmp(full + (fullLen - suffixLen), suffix, suffixLen) == 0);
+}
+
+static size_t qqesignBoundedCStringLength(const char *s, size_t maxLen) {
+    if (!s) return 0;
+    size_t n = 0;
+    while (n < maxLen && s[n] != '\0') n++;
+    return n;
+}
+
+static BOOL qqesignResolveInlineHookBackend(void) {
+    if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+
+    gQQEDobbyHook = (QQEDobbyHookFn)dlsym(RTLD_DEFAULT, "DobbyHook");
+    gQQEMSHookFunction = (QQEMSHookFunctionFn)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+
+    static const char *const dylibs[] = {
+        "/usr/lib/libdobby.dylib",
+        "/usr/lib/libsubstrate.dylib",
+        "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
+        "/usr/lib/libhooker.dylib",
+    };
+    for (NSUInteger i = 0; i < sizeof(dylibs) / sizeof(dylibs[0]); i++) {
+        void *h = dlopen(dylibs[i], RTLD_NOW);
+        if (!h) continue;
+        if (!gQQEDobbyHook) {
+            gQQEDobbyHook = (QQEDobbyHookFn)dlsym(h, "DobbyHook");
+        }
+        if (!gQQEMSHookFunction) {
+            gQQEMSHookFunction = (QQEMSHookFunctionFn)dlsym(h, "MSHookFunction");
+        }
+        if (gQQEDobbyHook || gQQEMSHookFunction) return YES;
+    }
+    return NO;
+}
+
+static BOOL qqesignInstallInlineHook(void *target, void *replacement, void **origin, const char *tag) {
+    if (!target || !replacement) return NO;
+    if (!qqesignResolveInlineHookBackend()) {
+        NSLog(@"[QQESign] inline hook 后端未就绪(%s): 需要 DobbyHook 或 MSHookFunction", (tag ? tag : "unknown"));
+        return NO;
+    }
+
+    if (gQQEDobbyHook) {
+        int rc = gQQEDobbyHook(target, replacement, origin);
+        if (rc == 0) {
+            NSLog(@"[QQESign] inline hook 安装成功(Dobby): %s target=%p", (tag ? tag : "unknown"), target);
+            return YES;
+        }
+        NSLog(@"[QQESign] inline hook 安装失败(Dobby rc=%d): %s target=%p", rc, (tag ? tag : "unknown"), target);
+    }
+
+    if (gQQEMSHookFunction) {
+        gQQEMSHookFunction(target, replacement, origin);
+        NSLog(@"[QQESign] inline hook 安装完成(MSHookFunction): %s target=%p", (tag ? tag : "unknown"), target);
+        return YES;
+    }
+
+    NSLog(@"[QQESign] inline hook 安装失败: %s target=%p", (tag ? tag : "unknown"), target);
+    return NO;
+}
+
+static BOOL qqesignLoadQQImageInfo(QQESignQQImageInfo *info) {
+    if (!info) return NO;
+    memset(info, 0, sizeof(*info));
+
+    uint32_t imageCount = _dyld_image_count();
+    for (uint32_t i = 0; i < imageCount; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        if (!(qqesignHasSuffix(name, "/QQ") || strstr(name, "/QQ.app/QQ"))) continue;
+
+        const struct mach_header *mh = _dyld_get_image_header(i);
+        if (!mh || mh->magic != MH_MAGIC_64) continue;
+        const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+
+        const struct load_command *lc = (const struct load_command *)((const uint8_t *)mh64 + sizeof(struct mach_header_64));
+        for (uint32_t c = 0; c < mh64->ncmds; c++) {
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                    const struct section_64 *sec = (const struct section_64 *)(seg + 1);
+                    for (uint32_t s = 0; s < seg->nsects; s++) {
+                        if (strncmp(sec[s].sectname, "__text", 16) == 0) {
+                            info->textAddr = (uintptr_t)(sec[s].addr + slide);
+                            info->textBytes = (const uint8_t *)info->textAddr;
+                            info->textSize = (size_t)sec[s].size;
+                        } else if (strncmp(sec[s].sectname, "__cstring", 16) == 0) {
+                            info->cstringAddr = (uintptr_t)(sec[s].addr + slide);
+                            info->cstringBytes = (const char *)info->cstringAddr;
+                            info->cstringSize = (size_t)sec[s].size;
+                        }
+                    }
+                }
+            }
+            lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+        }
+
+        info->slide = slide;
+        info->imageName = name;
+        if (info->textBytes && info->textSize > 0 && info->cstringBytes && info->cstringSize > 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static int64_t qqesignSignExtend(uint64_t value, unsigned bits) {
+    if (bits == 0 || bits >= 64) return (int64_t)value;
+    uint64_t mask = (1ULL << bits) - 1ULL;
+    value &= mask;
+    uint64_t sign = 1ULL << (bits - 1);
+    return (int64_t)((value ^ sign) - sign);
+}
+
+static BOOL qqesignDecodeAdrpAndAdd(uintptr_t pc, uint32_t adrpInsn, uint32_t addInsn, uintptr_t *outTarget) {
+    if (!outTarget) return NO;
+    if ((adrpInsn & 0x9F000000u) != 0x90000000u) return NO;
+    if ((addInsn & 0xFFC00000u) != 0x91000000u) return NO;
+
+    uint32_t adrpReg = adrpInsn & 0x1Fu;
+    uint32_t addDst = addInsn & 0x1Fu;
+    uint32_t addSrc = (addInsn >> 5) & 0x1Fu;
+    if (addDst != adrpReg || addSrc != adrpReg) return NO;
+
+    uint64_t immlo = (adrpInsn >> 29) & 0x3u;
+    uint64_t immhi = (adrpInsn >> 5) & 0x7FFFFu;
+    int64_t adrpImm = qqesignSignExtend((immhi << 2) | immlo, 21) << 12;
+    uintptr_t page = (pc & ~(uintptr_t)0xFFFULL);
+    uintptr_t base = (uintptr_t)((int64_t)page + adrpImm);
+
+    uint32_t imm12 = (addInsn >> 10) & 0xFFFu;
+    uint32_t shift = (addInsn >> 22) & 0x3u;
+    if (shift > 1u) return NO;
+    uintptr_t addImm = (uintptr_t)imm12 << (shift ? 12 : 0);
+    *outTarget = base + addImm;
+    return YES;
+}
+
+static uintptr_t qqesignFindFunctionStart(const QQESignQQImageInfo *info, uintptr_t refPc) {
+    if (!info || !info->textBytes || info->textSize < 8) return 0;
+    if (refPc < info->textAddr || refPc >= info->textAddr + info->textSize) return 0;
+
+    const uint32_t *insn = (const uint32_t *)info->textBytes;
+    size_t count = info->textSize / sizeof(uint32_t);
+    size_t idx = (refPc - info->textAddr) / sizeof(uint32_t);
+
+    size_t backLimit = 256; // 1KB window
+    if (idx < backLimit) backLimit = idx;
+
+    for (size_t back = 0; back <= backLimit; back++) {
+        size_t pos = idx - back;
+        if (pos + 1 >= count) break;
+
+        uint32_t i0 = insn[pos];
+        uint32_t i1 = insn[pos + 1];
+        if ((i0 & 0xFFC003FFu) == 0xA98003FDu && (i1 & 0xFFC003FFu) == 0x910003FDu) {
+            return info->textAddr + pos * sizeof(uint32_t);
+        }
+    }
+    return 0;
+}
+
+static uintptr_t qqesignFindFunctionByMarkerPrefix(const QQESignQQImageInfo *info,
+                                                   const char *markerPrefix,
+                                                   const char *tag) {
+    if (!info || !info->cstringBytes || !info->textBytes || !markerPrefix) return 0;
+
+    size_t prefixLen = strlen(markerPrefix);
+    const char *base = info->cstringBytes;
+    size_t off = 0;
+    while (off < info->cstringSize) {
+        size_t left = info->cstringSize - off;
+        size_t len = qqesignBoundedCStringLength(base + off, left);
+        if (len == 0) {
+            off++;
+            continue;
+        }
+
+        if (len >= prefixLen && strncmp(base + off, markerPrefix, prefixLen) == 0) {
+            uintptr_t markerAddr = info->cstringAddr + off;
+            const uint32_t *insn = (const uint32_t *)info->textBytes;
+            size_t count = info->textSize / sizeof(uint32_t);
+
+            for (size_t i = 0; i + 1 < count; i++) {
+                uintptr_t pc = info->textAddr + i * sizeof(uint32_t);
+                uintptr_t target = 0;
+                if (!qqesignDecodeAdrpAndAdd(pc, insn[i], insn[i + 1], &target)) continue;
+                if (target != markerAddr) continue;
+
+                uintptr_t fn = qqesignFindFunctionStart(info, pc);
+                if (fn) {
+                    NSLog(@"[QQESign] 定位 C++ 函数成功(%s): marker=%s markerAddr=%p fn=%p",
+                          (tag ? tag : "inline-find"),
+                          markerPrefix,
+                          (void *)markerAddr,
+                          (void *)fn);
+                    return fn;
+                }
+            }
+        }
+        off += len + 1;
+    }
+
+    NSLog(@"[QQESign] 定位 C++ 函数失败(%s): marker=%s", (tag ? tag : "inline-find"), markerPrefix);
+    return 0;
+}
+
+static uintptr_t qqesignInlineKernelRecallMsgFromC2CAndGroup(void *x0, const void *x1, const void *x2, const void *x3) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] inline-C++ 拦截 KernelMsgService::recallMsgFromC2CAndGroup");
+        return 0;
+    }
+    if (gQQEOrigKernelRecallMsgFromC2CAndGroup) {
+        return gQQEOrigKernelRecallMsgFromC2CAndGroup(x0, x1, x2, x3);
+    }
+    return 0;
+}
+
+static uintptr_t qqesignInlineKernelGetRecallMsgsByMsgId(void *x0, const void *x1, const void *x2, const void *x3) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] inline-C++ 拦截 KernelMsgService::getRecallMsgsByMsgId");
+        return 0;
+    }
+    if (gQQEOrigKernelGetRecallMsgsByMsgId) {
+        return gQQEOrigKernelGetRecallMsgsByMsgId(x0, x1, x2, x3);
+    }
+    return 0;
+}
+
+static uintptr_t qqesignInlineMsgRecallMgrRecallMsg(void *x0,
+                                                    void *x1,
+                                                    void *x2,
+                                                    void *x3,
+                                                    void *x4,
+                                                    void *x5,
+                                                    void *x6,
+                                                    void *x7) {
+    if (pref_antiRevoke) {
+        NSLog(@"[QQESign] inline-C++ 拦截 MsgRecallMgr::RecallMsg");
+        return 0;
+    }
+    if (gQQEOrigMsgRecallMgrRecallMsg) {
+        return gQQEOrigMsgRecallMgrRecallMsg(x0, x1, x2, x3, x4, x5, x6, x7);
+    }
+    return 0;
+}
+
+static NSUInteger qqesignInstallKernelInlineHooksPass(const char *reason) {
+    NSUInteger installed = 0;
+    if (gQQEInlineHookFinalized) return 0;
+    BOOL attempted = NO;
+
+    if (!qqesignResolveInlineHookBackend()) {
+        NSLog(@"[QQESign] %s inline-C++ hook 未启用: 未找到 DobbyHook/MSHookFunction",
+              (reason ? reason : "anti-recall"));
+        return 0;
+    }
+
+    QQESignQQImageInfo imageInfo;
+    if (!qqesignLoadQQImageInfo(&imageInfo)) {
+        NSLog(@"[QQESign] %s inline-C++ hook 未启用: 无法定位 QQ 主程序 __text/__cstring",
+              (reason ? reason : "anti-recall"));
+        return 0;
+    }
+
+    if (gQQEHookAddrKernelRecallMsgFromC2CAndGroup == 0) {
+        attempted = YES;
+        uintptr_t target = qqesignFindFunctionByMarkerPrefix(&imageInfo,
+                                                             "ZN2nt7wrapper16KernelMsgService24recallMsgFromC2CAndGroup",
+                                                             "kernel-recall-from-c2c-group");
+        if (target && qqesignInstallInlineHook((void *)target,
+                                               (void *)qqesignInlineKernelRecallMsgFromC2CAndGroup,
+                                               (void **)&gQQEOrigKernelRecallMsgFromC2CAndGroup,
+                                               "KernelMsgService::recallMsgFromC2CAndGroup")) {
+            gQQEHookAddrKernelRecallMsgFromC2CAndGroup = target;
+            installed++;
+        }
+    }
+
+    if (gQQEHookAddrKernelGetRecallMsgsByMsgId == 0) {
+        attempted = YES;
+        uintptr_t target = qqesignFindFunctionByMarkerPrefix(&imageInfo,
+                                                             "ZN2nt7wrapper16KernelMsgService20getRecallMsgsByMsgId",
+                                                             "kernel-get-recall-msgs-by-id");
+        if (target && qqesignInstallInlineHook((void *)target,
+                                               (void *)qqesignInlineKernelGetRecallMsgsByMsgId,
+                                               (void **)&gQQEOrigKernelGetRecallMsgsByMsgId,
+                                               "KernelMsgService::getRecallMsgsByMsgId")) {
+            gQQEHookAddrKernelGetRecallMsgsByMsgId = target;
+            installed++;
+        }
+    }
+
+    if (gQQEHookAddrMsgRecallMgrRecallMsg == 0) {
+        attempted = YES;
+        uintptr_t target = qqesignFindFunctionByMarkerPrefix(&imageInfo,
+                                                             "MsgRecallMgr::RecallMsg",
+                                                             "msg-recall-mgr-recall-msg");
+        if (target && qqesignInstallInlineHook((void *)target,
+                                               (void *)qqesignInlineMsgRecallMgrRecallMsg,
+                                               (void **)&gQQEOrigMsgRecallMgrRecallMsg,
+                                               "MsgRecallMgr::RecallMsg")) {
+            gQQEHookAddrMsgRecallMgrRecallMsg = target;
+            installed++;
+        }
+    }
+
+    if (installed > 0) {
+        NSLog(@"[QQESign] %s 本轮新增 inline-C++ 防撤回 Hook: %lu",
+              (reason ? reason : "anti-recall"),
+              (unsigned long)installed);
+    }
+    if (attempted) {
+        gQQEInlineHookFinalized = YES;
+    }
+    return installed;
+}
 
 static BOOL qqesignIsRecallNotificationName(NSString *name) {
     if (name.length == 0) return NO;
@@ -721,6 +1141,8 @@ static NSUInteger qqesignInstallRecallHooksPass(const char *reason) {
                                                            specs[i].newImp,
                                                            specs[i].tag);
         }
+
+        installed += qqesignInstallKernelInlineHooksPass(reason);
     } @catch (NSException *e) {
         NSLog(@"[QQESign] 防撤回安装异常: %@ %@", e.name, e.reason);
     }
@@ -927,6 +1349,7 @@ static void qqesignInstallRecallHooksWithRetry(void) {
 %ctor {
     @autoreleasepool {
         loadPrefs();
+        NSLog(@"[QQESign] runtime log file: %@", qqesignRuntimeLogPath());
         qqesignInstallRecallHooksWithRetry();
         NSLog(@"[QQESign] v2.0 Loaded (NT架构) antiRevoke=%d flashUnlimited=%d flashSave=%d fakeDevice=%d fakeBatt=%d",
               pref_antiRevoke, pref_flashUnlimited, pref_flashSave,
